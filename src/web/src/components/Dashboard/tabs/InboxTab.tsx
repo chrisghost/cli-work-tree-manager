@@ -14,6 +14,8 @@ import { snoozeLabel } from '../../../../../core/rail/snooze.js';
 import { isArchived, lastActiveAt, agentCan, agentName, displayStatus, waitingOnOthers } from '../../../state/session-display.js';
 import { prNeedsLine } from '../../../state/pr-tab.js';
 import { StatusIcon } from '../StatusIcon.js';
+import { ColorMark } from '../ColorMark.js';
+import type { RailLayout } from '../../../../../core/rail/rail-layout.js';
 import type { SessionSubTab } from '../../../state/dashboard-route.js';
 import { compareInbox, inboxRank } from '../../../../../core/status/attention.js';
 import { relativeTime } from '../../../utils/time.js';
@@ -30,6 +32,8 @@ interface Props {
   onMarkSeen?: (id: string, prStage?: { kind: string; key: string } | null) => Promise<unknown>;
   /** Allow / Deny a permission prompt. Defaults to the API call. */
   onAnswer?: (id: string, req: AnswerRequest) => Promise<unknown>;
+  /** The rail's places: each session's color, a square before its name. */
+  layout?: Pick<RailLayout, 'places'>;
 }
 
 interface Section {
@@ -105,7 +109,14 @@ function NotificationOffer() {
  * one line at the end, pointing to the rail. Driven by Claude's own hooks
  * (see core/status/session-status.ts).
  */
-export function InboxTab({ sessions, onOpenSession, onMarkSeen = markSessionSeen, onAnswer = answerPermission, onReviewAll }: Props) {
+export function InboxTab({
+  sessions,
+  onOpenSession,
+  onMarkSeen = markSessionSeen,
+  onAnswer = answerPermission,
+  onReviewAll,
+  layout,
+}: Props) {
   // Per session: the answer being sent, or why the server refused it.
   const [answering, setAnswering] = useState<Record<string, 'allow' | 'deny'>>({});
   const [answerError, setAnswerError] = useState<Record<string, string>>({});
@@ -224,6 +235,7 @@ export function InboxTab({ sessions, onOpenSession, onMarkSeen = markSessionSeen
                     >
                       <StatusIcon kind={kind} />
                       <span className="wd-inbox-name">
+                        <ColorMark color={layout?.places[s.id]?.color} />
                         <span className="wd-inbox-branch">{s.titleIsYours && s.title ? s.title : s.branch}</span>
                         <span className="wd-inbox-target">{s.target}</span>
                       </span>
