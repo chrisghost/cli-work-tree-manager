@@ -380,6 +380,23 @@ export class DemoScenario {
   }
 
   private seed(): void {
+    // WORK_DEMO_MANY_REPOS=1: a group of 42 repos with long names, to try the Diff toolbar's repo switch.
+    if (process.env.WORK_DEMO_MANY_REPOS) {
+      const stems = ['shared-infrastructure-terraform', 'frontend-admin-portal', 'billing', 'api', 'notification-dispatcher-service'];
+      const repos = Array.from({ length: 42 }, (_, i) => {
+        const name = `${stems[i % stems.length]}-${String(i + 1).padStart(2, '0')}`;
+        const diff = i % 4 === 0 ? CSV_EXPORT : i % 7 === 0 ? AUTH_FIX : '';
+        return { name, uncommitted: diff, sinceBranch: diff };
+      });
+      this.add(
+        'platform',
+        'feat/many-repos',
+        repos,
+        { state: 'idle', seen: false, summary: 'Touched a few of the 42 repos.', minutesAgo: 1 },
+        claudeScreen('Update the shared client in every service', ['● Touched a few of the 42 repos.']),
+        2,
+      );
+    }
     this.add(
       'api',
       'feat/invoice-export',
