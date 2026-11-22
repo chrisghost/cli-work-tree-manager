@@ -139,6 +139,11 @@ export type DialogCheck = { ok: true } | { ok: false; reason: 'no-dialog' | 'oth
 export interface AgentInput {
   /** Type `text` into its prompt and submit it (`write`: the PTY; `wait`: a pause, for tests). */
   submit(write: (data: string) => Promise<boolean>, text: string, wait?: (ms: number) => Promise<void>): Promise<boolean>;
+  /**
+   * A question it is stopped at before its first turn, read from its terminal's screen ("do you trust this
+   * folder?"): what it asks in a line, or null. Absent: it has none work knows. Never answered by work.
+   */
+  startupQuestion?(screen: string): string | null;
   /** Its permission dialog on a terminal screen; absent: work can't answer its prompts by keystroke. */
   permissionDialog?: {
     check(screen: string, req: PermissionRequest): DialogCheck;
@@ -279,6 +284,16 @@ export interface AgentUsageSource {
   setup?(o: { enabled: boolean; lean: boolean }): Promise<string>;
   /** `work usage --restore`: give the agent's own setting back now. */
   restore?(): Promise<{ ok: boolean; message: string }>;
+  /**
+   * Ask the agent for what its readings can't carry (Claude: a model's own weekly window, as Fable's, `usage-ask.ts`)
+   * and record it; throttled by the agent, so it may be called on every request. Never throws.
+   */
+  refresh?(): Promise<void>;
+  /**
+   * Whether the user has a status line of their own for this agent (Claude: one in any account's settings that isn't
+   * work's). The dashboard asks about work's own line only when they don't: theirs stays theirs.
+   */
+  ownStatusLine?(): boolean;
 }
 
 /** One of an agent's accounts (Claude: a config folder with its own login). */

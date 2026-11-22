@@ -1,7 +1,8 @@
 import type { PrReviewWire } from '../api-types.js';
+import type { StoredLocalReview } from './local-review.js';
 import { asData } from '../time/fence.js';
 import { describeReview } from './review-build.js';
-import { NOTE_LEVEL_LABEL } from './review-plan.js';
+import { NOTE_LEVEL_LABEL, VERDICT_LABEL } from './review-plan.js';
 
 /**
  * The Reviews tab's reviews as text, for `work review` (a terminal, another session's agent, the Ctrl+K assistant):
@@ -54,4 +55,44 @@ export function reviewText(r: PrReviewWire): string {
       : []),
     ...(posted ? [`${posted} comment${posted === 1 ? ' is' : 's are'} already posted.`] : []),
   ].join('\n');
+}
+
+/**
+ * A session's own review as it is kept (its Review tab), in full, for `work review session` (reported: a session's
+ * agent asked to "check work review" looked at its comments and found none — the review isn't a comment, and it had
+ * no way to read it). The notes you dismissed are left out (you didn't agree with them); the ones already handed to
+ * the agent are said. Pure.
+ */
+export function sessionReviewText(kept: StoredLocalReview): string {
+  const gone = new Set(kept.dismissed);
+  const review = { ...kept.prepared.review, drafts: kept.prepared.review.drafts.filter((d) => !gone.has(d.id)) };
+  const left = new Set(review.drafts.filter((d) => d.state === 'draft').map((d) => d.id));
+  const sent = kept.sent.filter((id) => left.has(id));
+  return [
+    `Prepared ${kept.at}${kept.prepared.how ? ` (${kept.prepared.how})` : ''}; of ${kept.repo ?? `all its repos with changes (${kept.repos.join(', ')})`}.`,
+    reviewText(review),
+    ...(sent.length ? [`Already handed to this session's agent: ${sent.map((id) => `[${id}]`).join(' ')}.`] : []),
+    ...(gone.size
+      ? [`${gone.size} note${gone.size === 1 ? '' : 's'} the user dismissed ${gone.size === 1 ? 'is' : 'are'} not listed.`]
+      : []),
+  ].join('\n');
+}
+
+/**
+ * What the notification of a review you asked for says (reported: after Prepare again nothing said it was done).
+ * Ready: its recommendation when it has one, its stories and draft comments. Failed: why. Pure.
+ */
+export function reviewNotifyText(
+  repo: string,
+  number: number,
+  r: { ok: true; review: Pick<PrReviewWire, 'recommendation' | 'stories' | 'drafts' | 'title'> } | { ok: false; error: string },
+): { title: string; body: string } {
+  if (!r.ok) return { title: `${repo} #${number}: review failed`, body: r.error };
+  const notes = r.review.drafts.filter((d) => d.state === 'draft').length;
+  const parts = [
+    r.review.recommendation ? VERDICT_LABEL[r.review.recommendation.verdict] : '',
+    `${r.review.stories.length} ${r.review.stories.length === 1 ? 'story' : 'stories'}`,
+    `${notes} draft comment${notes === 1 ? '' : 's'}`,
+  ].filter(Boolean);
+  return { title: `${repo} #${number}: review ready`, body: `${r.review.title.slice(0, 80)} — ${parts.join(' · ')}` };
 }

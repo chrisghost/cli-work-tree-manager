@@ -99,6 +99,34 @@ export async function buildUsage(deps: UsageDeps, now = Date.now()): Promise<Usa
   };
 }
 
+/**
+ * Let each agent ask for what its readings can't carry (`AgentUsageSource.refresh`: Claude's per-model windows); the
+ * answers land in the readings folder. One that fails is logged, never thrown: the readings there still answer.
+ */
+export async function refreshUsage(agents: Array<{ id: string; usage?: Pick<AgentUsageSource, 'refresh'> }>): Promise<void> {
+  await Promise.all(
+    agents.map(async (a) => {
+      try {
+        await a.usage?.refresh?.();
+      } catch (e) {
+        logSwallowed(`usage: refresh of ${a.id}`, e);
+      }
+    }),
+  );
+}
+
+/** Whether the user has a status line of their own for any agent (`AgentUsageSource.ownStatusLine`); one that can't tell counts as no. */
+export function anyOwnStatusLine(agents: Array<{ id: string; usage?: Pick<AgentUsageSource, 'ownStatusLine'> }>): boolean {
+  return agents.some((a) => {
+    try {
+      return a.usage?.ownStatusLine?.() === true;
+    } catch (e) {
+      logSwallowed(`usage: own status line of ${a.id}`, e);
+      return false;
+    }
+  });
+}
+
 /** The sessions whose tokens can fall in the week: not archived, and their agent wrote in the last 7 days. */
 export function usageSessions(all: WorktreeSession[], lastWriteMs: (s: WorktreeSession) => number, now: number): WorktreeSession[] {
   return all.filter((s) => !s.archivedAt && lastWriteMs(s) >= now - WEEK_DAYS * 24 * 3_600_000);

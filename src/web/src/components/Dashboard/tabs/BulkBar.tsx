@@ -2,8 +2,9 @@ import { useState } from 'react';
 import type { SessionSummary } from '../../../api/client.js';
 import type { SnoozeChoice, SnoozeFor } from '../../../../../core/rail/snooze.js';
 import { SnoozeUntilDialog } from '../SnoozeUntilDialog.js';
-import { RowMenu } from '../RowMenu.js';
-import type { PlacePatch, RailSection } from '../../../../../core/rail/rail-layout.js';
+import { RAIL_COLOR_LABEL, type PlacePatch, type RailLayout, type RailSection } from '../../../../../core/rail/rail-layout.js';
+import { colorSwatches, sharedColor } from '../../../state/rail-menu.js';
+import { Button, TextArea, Menu } from '../../../ui/index.js';
 
 /** What the bulk bar can do; each returns a promise per session (the same calls as the one-session buttons). */
 export interface BulkActions {
@@ -30,6 +31,7 @@ export function BulkBar({
   onClear,
   busy,
   sections = [],
+  places = {},
 }: {
   selected: SessionSummary[];
   /** Ticked, but hidden by the filter: left out. */
@@ -41,6 +43,8 @@ export function BulkBar({
   busy: string | null;
   /** The rail's sections, for Move to. */
   sections?: RailSection[];
+  /** The rail's places, for the color the ticked sessions have now. */
+  places?: RailLayout['places'];
 }) {
   const [mode, setMode] = useState<null | 'send' | 'archive' | 'delete'>(null);
   const [text, setText] = useState('');
@@ -70,7 +74,7 @@ export function BulkBar({
             setMode(null);
           }}
         >
-          <textarea
+          <TextArea
             autoFocus
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -78,48 +82,40 @@ export function BulkBar({
             rows={2}
             aria-label="Prompt to send"
           />
-          <button type="submit" className="wd-btn-primary" disabled={!text.trim() || live.length === 0}>
+          <Button type="submit" variant="primary" disabled={!text.trim() || live.length === 0}>
             Send to {live.length}
-          </button>
-          <button type="button" className="wd-btn-secondary" onClick={() => setMode(null)}>
-            Cancel
-          </button>
+          </Button>
+          <Button onClick={() => setMode(null)}>Cancel</Button>
         </form>
       ) : mode === 'archive' ? (
         <span className="wd-bulk-confirm" role="alert">
           Archive {live.length} session{live.length === 1 ? '' : 's'}? Their Claudes stop, and a worktree goes only where nothing would be
           lost; one with work waiting is refused and listed. Restore brings each back.{' '}
-          <button
-            type="button"
-            className="wd-btn-primary"
+          <Button
+            variant="primary"
             onClick={() => {
               setMode(null);
               onRun('Archived', (s) => actions.archive(s), live);
             }}
           >
             Archive
-          </button>
-          <button type="button" className="wd-btn-secondary" onClick={() => setMode(null)}>
-            Cancel
-          </button>
+          </Button>
+          <Button onClick={() => setMode(null)}>Cancel</Button>
         </span>
       ) : mode === 'delete' ? (
         <span className="wd-bulk-confirm" role="alert">
           Delete {selected.length} session{selected.length === 1 ? '' : 's'}? A worktree goes only where nothing would be lost; the others
           are refused and listed.{' '}
-          <button
-            type="button"
-            className="wd-btn-danger"
+          <Button
+            variant="danger"
             onClick={() => {
               setMode(null);
               onRun('Deleted', (s) => actions.remove(s), selected);
             }}
           >
             Delete
-          </button>
-          <button type="button" className="wd-btn-secondary" onClick={() => setMode(null)}>
-            Cancel
-          </button>
+          </Button>
+          <Button onClick={() => setMode(null)}>Cancel</Button>
         </span>
       ) : (
         <>
@@ -158,7 +154,7 @@ export function BulkBar({
                 const r = e.currentTarget.getBoundingClientRect();
                 setMoveAt({ x: r.left, y: r.bottom + 2 });
               }}
-              title="Pin them, or put them under one of the rail's sections"
+              title="Pin them, put them under one of the rail's sections, or color them"
             >
               Rail ▾
             </button>
@@ -172,7 +168,7 @@ export function BulkBar({
         </>
       )}
       {snoozeAt && (
-        <RowMenu
+        <Menu
           x={snoozeAt.x}
           y={snoozeAt.y}
           onClose={() => setSnoozeAt(null)}
@@ -188,7 +184,7 @@ export function BulkBar({
         />
       )}
       {moveAt && actions.place && (
-        <RowMenu
+        <Menu
           x={moveAt.x}
           y={moveAt.y}
           onClose={() => setMoveAt(null)}
@@ -208,6 +204,18 @@ export function BulkBar({
                   },
                 ]
               : []),
+            colorSwatches(
+              sharedColor(
+                live.map((s) => s.id),
+                { places },
+              ),
+              (color) =>
+                onRun(
+                  color ? `Colored ${RAIL_COLOR_LABEL[color].toLowerCase()}` : 'Took the color off',
+                  (s) => actions.place!(s, { color }),
+                  live,
+                ),
+            ),
           ]}
         />
       )}

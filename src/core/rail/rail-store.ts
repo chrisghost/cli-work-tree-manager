@@ -1,9 +1,11 @@
+import { loadConfig } from '../platform/config.js';
 import { json, tx, withDb, type Db } from '../platform/db.js';
 import {
   applyPlacePatch,
   applySectionOp,
   asRailPlace,
   cleanSections,
+  projectColorsOf,
   type PlacePatch,
   type RailLayout,
   type RailPlace,
@@ -12,7 +14,7 @@ import {
 } from './rail-layout.js';
 
 /**
- * The rail's pins and sections in state.db (rail-layout.ts has the rules):
+ * The rail's pins, sections and colors in state.db (rail-layout.ts has the rules):
  * the sections in `meta` (one list, yours), each session's place in
  * `rail_place` (one row per session, gone with it: purgeSessionRows).
  */
@@ -30,7 +32,8 @@ export function readRailLayout(): RailLayout {
       const p = asRailPlace(json.parse(r.data));
       if (p) places[r.session_id] = p;
     }
-    return { sections: readSections(d), places };
+    const projectColors = projectColorsOf(loadConfig()?.colors);
+    return { sections: readSections(d), places, ...(Object.keys(projectColors).length ? { projectColors } : {}) };
   });
 }
 
@@ -63,7 +66,7 @@ function writeSections(d: Db, sections: RailSection[]): void {
 
 export type PlaceResult = { ok: true; layout: RailLayout } | { ok: false; error: string };
 
-/** Pin / unpin a session, or move it into or out of a section (which must exist). */
+/** Pin / unpin a session, move it into or out of a section (which must exist), or color it. */
 export function placeSession(sessionId: string, patch: PlacePatch): PlaceResult {
   const error = tx((d) => {
     if (patch.section && !readSections(d).some((s) => s.id === patch.section)) return 'no such section';

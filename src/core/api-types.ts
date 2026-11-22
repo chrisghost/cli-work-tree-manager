@@ -605,7 +605,9 @@ export interface SessionWire {
    *  can be added to it (POST …/repos). Absent from a server before this. */
   folder?: boolean;
   baseBranch?: string;
-  jiraKey?: string;
+  issueKey?: string;
+  /** The issue it was started from, whatever connector it is from (a Jira key is one: `{ source: 'jira', key }`). Absent: none, or an older server. */
+  issue?: import('./issues/issue-source.js').IssueRef;
   createdAt: string;
   lastAccessedAt: string;
   draftCount: number;
@@ -1087,6 +1089,14 @@ export interface NotifyEvent {
   body?: string;
 }
 
+/** `review-notify` (SSE): a PR review you asked for (Prepare it now / again) is done, or failed. Click: that review. */
+export interface ReviewNotifyEvent {
+  repo: string;
+  number: number;
+  title: string;
+  body: string;
+}
+
 /** GET /api/sessions/:id/dev — the worktree's port and dev server. */
 export interface DevServerState {
   port: number | null;
@@ -1168,7 +1178,7 @@ export interface RepliesWire {
 // ---- the rail's pins and sections (rail-layout.ts) -------------------------------
 
 /** GET /api/rail (and every rail write's answer). */
-export type { RailLayout, RailSection, RailPlace, PlacePatch, SectionOp } from './rail/rail-layout.js';
+export type { RailLayout, RailSection, RailPlace, RailColor, PlacePatch, SectionOp } from './rail/rail-layout.js';
 
 // ---- the PTY host's heartbeat (host-health.ts) ----------------------------------------
 
@@ -1913,7 +1923,13 @@ export interface ReviewSummaryWire {
   flags: number;
   /** Production changes no test touches. */
   gaps: number;
+  /** You submitted a review of it as it is prepared now (absent: not yet). */
+  submitted?: true;
 }
+
+/** GET /api/issues — your issues from every connector (core/issues/issue-source.ts), and whether each could be asked. */
+export type IssueWire = import('./issues/issue-source.js').Issue;
+export type IssuesWire = import('./issues/issue-source.js').IssuesList;
 
 /** GET /api/reviews */
 export interface ReviewsWire {
@@ -1940,6 +1956,8 @@ export interface ReviewSettingsWire {
  *  `SETTINGS`; the rest are their defaults). Nothing else of config.json is in it. */
 export interface SettingsWire {
   values: Record<string, unknown>;
+  /** The user has a status line of their own (an agent's settings): the dashboard doesn't ask about work's (`StatusLineAsk`). */
+  ownStatusLine?: boolean;
   /** Where config.json is, for what isn't on the page. */
   configPath: string;
 }
@@ -1956,6 +1974,8 @@ export interface RepoSettingsWire {
   reviews: 'all' | 'asked' | 'off' | null;
   /** What reviews of this repo pay attention to, besides what every review does (`reviews.focusFor[alias]`); null: nothing more. */
   reviewFocus: string[] | null;
+  /** Its sessions' colour unless one has its own (`colors[alias]`); null: none. */
+  color: import('./rail/rail-layout.js').RailColor | null;
 }
 
 /** One process of a session: its agent, something the agent started, or something running from its folder. */
@@ -2019,6 +2039,8 @@ export interface SessionReviewWire {
   review?: PrReviewWire;
   /** How the AI step read the changes of `review`: "read in its folder", or from the diff alone and why. */
   how?: string;
+  /** What you asked `review` alone to also pay attention to (the box beside Prepare starts with it). */
+  also?: string;
   /** Of `review`: the notes handed to the session's agent, and the ones you dismissed (kept across restarts). */
   sent?: string[];
   dismissed?: string[];

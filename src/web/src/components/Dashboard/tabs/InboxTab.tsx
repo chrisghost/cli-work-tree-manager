@@ -1,6 +1,6 @@
+import { sessionColor } from '../../../../../core/rail/rail-layout.js';
 import { useMemo, useState } from 'react';
 import { SnoozeUntilDialog } from '../SnoozeUntilDialog.js';
-import { RowMenu } from '../RowMenu.js';
 import { useNotificationPermission } from '../../../hooks/use-presence.js';
 import {
   answerPermission,
@@ -16,9 +16,12 @@ import { isArchived, lastActiveAt, agentCan, agentName, displayStatus, waitingOn
 import { prNeedsLine } from '../../../state/pr-tab.js';
 import { StatusIcon } from '../StatusIcon.js';
 import { InboxFollowUp } from '../InboxFollowUp.js';
+import { ColorMark } from '../ColorMark.js';
+import type { RailLayout } from '../../../../../core/rail/rail-layout.js';
 import type { SessionSubTab } from '../../../state/dashboard-route.js';
 import { compareInbox, inboxRank, prWantsYou, reviewWantsYou } from '../../../../../core/status/attention.js';
 import { relativeTime } from '../../../utils/time.js';
+import { Menu, PageHeader } from '../../../ui/index.js';
 
 interface Props {
   sessions: SessionSummary[];
@@ -34,6 +37,8 @@ interface Props {
   onAnswer?: (id: string, req: AnswerRequest) => Promise<unknown>;
   /** The follow-up panel's calls (its reply, and the send); tests swap them. */
   followUp?: { load?: (id: string) => Promise<string | null>; send?: (id: string, body: string) => Promise<void> };
+  /** The rail's places: each session's color, a square before its name. */
+  layout?: Pick<RailLayout, 'places'>;
 }
 
 interface Section {
@@ -116,6 +121,7 @@ export function InboxTab({
   onAnswer = answerPermission,
   onReviewAll,
   followUp,
+  layout,
 }: Props) {
   /** The finished session whose follow-up panel is open (one at a time). */
   const [following, setFollowing] = useState<string | null>(null);
@@ -183,17 +189,9 @@ export function InboxTab({
 
   return (
     <div className="wd-dash-tab-pane wd-tab-inbox">
-      <header className="wd-tab-header">
-        <h1>
-          Inbox{' '}
-          {waitingCount > 0 && (
-            <span className="wd-tab-header-muted">
-              {waitingCount} need{waitingCount === 1 ? 's' : ''} you
-            </span>
-          )}
-        </h1>
+      <PageHeader title="Inbox" meta={waitingCount > 0 ? `${waitingCount} need${waitingCount === 1 ? 's' : ''} you` : undefined}>
         <NotificationOffer />
-      </header>
+      </PageHeader>
       {tracked === 0 ? (
         <div className="wd-tab-empty">
           No session has reported its status yet. Status comes from Claude&apos;s hooks, which the full <code>work web</code> installs (not
@@ -239,6 +237,7 @@ export function InboxTab({
                     >
                       <StatusIcon kind={kind} />
                       <span className="wd-inbox-name">
+                        <ColorMark color={sessionColor(layout, s)} />
                         <span className="wd-inbox-branch">{s.titleIsYours && s.title ? s.title : s.branch}</span>
                         <span className="wd-inbox-target">{s.target}</span>
                       </span>
@@ -409,7 +408,7 @@ export function InboxTab({
         </ul>
       )}
       {snoozeMenu && (
-        <RowMenu
+        <Menu
           x={snoozeMenu.x}
           y={snoozeMenu.y}
           onClose={() => setSnoozeMenu(null)}

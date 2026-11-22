@@ -1,3 +1,4 @@
+import { projectColorsOf } from '../rail/rail-layout.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFile } from './fs-safe.js';
@@ -27,6 +28,8 @@ export interface WorkConfig {
   ignoredRepos?: string[];
   /** The Jira watch (jira-watch.ts; turned on and off in the Jira tab): at most this many automatic starts a day (default 5). */
   jiraWatch?: { maxPerDay?: number };
+  /** Where issues start (core/issues/issue-place.ts): your rules, a line each (`jira:PAY -> api`). */
+  issues?: { rules?: string[] };
   /** The Time tab's rules (core/time/allocate.ts, defaults in DEFAULT_TIME_SETTINGS), and the Jira
    *  projects whose keys count in commit subjects (default: the projects of your sessions' keys). */
   time?: Partial<import('../time/allocate.js').TimeSettings> & {
@@ -50,6 +53,8 @@ export interface WorkConfig {
   claudeAccounts?: Record<string, string>;
   /** The account new sessions and work's own Claude runs use: `default` or a key of `claudeAccounts`. */
   claudeAccount?: string;
+  /** The status line under the Claudes work starts: `work`'s own (work-line.ts) or the user's (`own`); unset: never asked, the user's. */
+  claudeStatusLine?: 'work' | 'own';
   /** The agent that writes work's own summaries — checkpoint names, catch-up, archive summaries, the Jira watch's choice (default `claude`; one without one-shot runs writes none). */
   internalAgent?: string;
   /** The agent the Ctrl+K assistant runs (an adapter's id; Claude Code by default). */
@@ -124,6 +129,8 @@ export interface WorkConfig {
    * worktree's $PORT (e.g. `{ "web": "npm run dev -- --port $PORT" }`).
    */
   devCommands?: Record<string, string>;
+  /** A project's colour (a repo alias or a group's name → red, orange, yellow, green, blue or purple): its sessions' colour in the rail and the lists unless one has its own (rail-layout.ts sessionColor). */
+  colors?: Record<string, import('../rail/rail-layout.js').RailColor>;
   /**
    * Stop a session's Claude in the PTY host after this many minutes idle with
    * no window attached; opening the session resumes its conversation. Frees
@@ -348,6 +355,7 @@ export function loadConfig(): WorkConfig | null {
       launchViaHost: typeof parsed.launchViaHost === 'boolean' ? parsed.launchViaHost : undefined,
       sessionFolders: typeof parsed.sessionFolders === 'boolean' ? parsed.sessionFolders : undefined,
       devCommands: validateDevCommands(parsed.devCommands),
+      colors: Object.keys(projectColorsOf(parsed.colors)).length ? projectColorsOf(parsed.colors) : undefined,
       sleepIdleAfterMinutes:
         typeof parsed.sleepIdleAfterMinutes === 'number' && parsed.sleepIdleAfterMinutes >= 0 ? parsed.sleepIdleAfterMinutes : undefined,
       useBundledConpty: typeof parsed.useBundledConpty === 'boolean' ? parsed.useBundledConpty : undefined,
@@ -369,6 +377,7 @@ export function loadConfig(): WorkConfig | null {
       usage: parsed.usage && typeof parsed.usage === 'object' ? { statusLine: parsed.usage.statusLine !== false } : undefined,
       claudeAccounts: stringRecord(parsed.claudeAccounts),
       claudeAccount: typeof parsed.claudeAccount === 'string' ? parsed.claudeAccount : undefined,
+      claudeStatusLine: parsed.claudeStatusLine === 'work' || parsed.claudeStatusLine === 'own' ? parsed.claudeStatusLine : undefined,
       internalAgent: isAgentId(parsed.internalAgent) ? parsed.internalAgent : undefined,
       assistantAgent: isAgentId(parsed.assistantAgent) ? parsed.assistantAgent : undefined,
       reviews:
@@ -411,6 +420,10 @@ export function loadConfig(): WorkConfig | null {
       hostEnv: Array.isArray(parsed.hostEnv)
         ? parsed.hostEnv.filter((n: unknown): n is string => typeof n === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(n))
         : undefined,
+      issues:
+        parsed.issues && typeof parsed.issues === 'object' && Array.isArray(parsed.issues.rules)
+          ? { rules: (parsed.issues.rules as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim()) }
+          : undefined,
       // The Settings page writes it (reported: it saved and nothing read it).
       jiraWatch:
         parsed.jiraWatch && typeof parsed.jiraWatch === 'object' && typeof parsed.jiraWatch.maxPerDay === 'number'

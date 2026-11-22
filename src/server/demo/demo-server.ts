@@ -1,3 +1,4 @@
+import type { IssuesWire } from '../../core/api-types.js';
 import { demoReview, demoReviewFiles } from './demo-reviews.js';
 import type { SessionReviewWire } from '../../core/api-types.js';
 import { stopRefusal } from '../../core/sessions/process-stop.js';
@@ -51,7 +52,14 @@ import { demoCodeFile, demoCodeFiles, demoCodeSearch } from './demo-code.js';
 import { DEFAULT_PROMPTS } from '../../core/sessions/saved-prompts.js';
 import { buildStamp } from '../../core/platform/build-stamp.js';
 import { cleanOrder } from '../../core/rail/session-order.js';
-import { applyPlacePatch, applySectionOp, cleanPlacePatch, cleanSectionOp, type RailLayout } from '../../core/rail/rail-layout.js';
+import {
+  applyPlacePatch,
+  applySectionOp,
+  cleanPlacePatch,
+  cleanSectionOp,
+  PLACE_PATCH_EXPECTED,
+  type RailLayout,
+} from '../../core/rail/rail-layout.js';
 import { prUrl } from '../../core/rail/blocks.js';
 import { buildTimeline } from '../../core/conversations/timeline.js';
 import { createDemoActivity } from './demo-activity.js';
@@ -209,16 +217,16 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
   app.get('/api/sessions/:id/worklog', (c) => {
     const w = scenario.list().find((x) => x.id === c.req.param('id'));
     return w
-      ? c.json({ configured: true, issueKey: w.jiraKey ?? null, logged: worklogs.get(w.id) ?? {} } satisfies WorklogWire)
+      ? c.json({ configured: true, issueKey: w.issueKey ?? null, logged: worklogs.get(w.id) ?? {} } satisfies WorklogWire)
       : notFound(c);
   });
   app.post('/api/sessions/:id/worklog', (c) => {
     const w = scenario.list().find((x) => x.id === c.req.param('id'));
     if (!w) return notFound(c);
-    if (!w.jiraKey) return c.json({ error: 'this session has no Jira issue' }, 409);
+    if (!w.issueKey) return c.json({ error: 'this session has no Jira issue' }, 409);
     const day = dayKey(scenario.clockMs());
     worklogs.set(w.id, { ...(worklogs.get(w.id) ?? {}), [day]: 3600 });
-    return c.json({ ok: true, logged: 3600, total: 3600, text: `1h logged on ${w.jiraKey} for ${day}` });
+    return c.json({ ok: true, logged: 3600, total: 3600, text: `1h logged on ${w.issueKey} for ${day}` });
   });
 
   // A session's timeline: built by the real buildTimeline from what the demo has.
@@ -303,6 +311,17 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
     const w = scenario.list().find((x) => x.id === c.req.param('id'));
     if (!w) return notFound(c);
     return localReviews.has(w.id) ? c.json({ files: demoReviewFiles() }) : c.json({ error: 'no review of it is prepared' }, 404);
+  });
+  // The demo hands nothing to anyone: it answers as the real route does.
+  app.post('/api/sessions/:id/review/recommendation', async (c) => {
+    const w = scenario.list().find((x) => x.id === c.req.param('id'));
+    if (!w) return notFound(c);
+    if (w.archivedAt) return c.json({ error: 'It is archived: restore it first.' }, 409);
+    const review = demoLocalReview(w).review;
+    if (!review) return c.json({ error: 'no review of it is prepared' }, 409);
+    if (!review.recommendation) return c.json({ error: 'It has no recommendation to hand over.' }, 409);
+    const body = await json(c);
+    return c.json({ ok: true, decided: typeof body.decision === 'string' && !!body.decision.trim() });
   });
   app.post('/api/sessions/:id/review/send', async (c) => {
     const w = scenario.list().find((x) => x.id === c.req.param('id'));
@@ -710,10 +729,24 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
     return c.json({ order });
   });
 
-  // The rail's pins and sections, in memory, by the real rules (rail-layout.ts).
+  // The rail's pins, sections and colors, in memory, by the real rules (rail-layout.ts).
   let rail: RailLayout = { sections: [], places: {} };
   const railChanged = () => broadcast({ event: 'rail-changed', data: { ts: Date.now() } });
-  app.get('/api/rail', (c) => c.json(rail));
+  // Its settings (made here so the rail can read a repo's colour; mounted with the other settings below).
+  const demoSettings = createDemoSettings(
+    (alias) => scenario.repos.inventory().repos.find((r) => r.alias === alias && r.status !== 'new')?.path ?? null,
+  );
+  /** The rail as it is answered: with each repo's colour, as work web's (rail-store.ts readRailLayout). */
+  const railView = (): RailLayout => {
+    const projectColors: NonNullable<RailLayout['projectColors']> = {};
+    for (const r of scenario.repos.inventory().repos) {
+      if (r.status === 'new' || !r.alias) continue;
+      const color = demoSettings.readRepo(r.alias).color;
+      if (color) projectColors[r.alias] = color;
+    }
+    return { ...rail, ...(Object.keys(projectColors).length ? { projectColors } : {}) };
+  };
+  app.get('/api/rail', (c) => c.json(railView()));
   app.post('/api/rail/sections', async (c) => {
     const op = cleanSectionOp(await json(c));
     if (!op) return c.json({ error: 'expected {op: add|rename|move|remove, id, name?, by?}' }, 400);
@@ -728,13 +761,13 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
     }
     rail = { sections, places };
     railChanged();
-    return c.json(rail);
+    return c.json(railView());
   });
   app.put('/api/sessions/:id/rail', async (c) => {
     const id = c.req.param('id');
     if (!scenario.list().some((x) => x.id === id)) return notFound(c);
     const patch = cleanPlacePatch(await json(c));
-    if (!patch) return c.json({ error: 'expected {pinned?: boolean, section?: string | null}' }, 400);
+    if (!patch) return c.json({ error: PLACE_PATCH_EXPECTED }, 400);
     if (patch.section && !rail.sections.some((s) => s.id === patch.section)) return c.json({ error: 'no such section' }, 409);
     const places = { ...rail.places };
     const next = applyPlacePatch(places[id], patch);
@@ -742,7 +775,7 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
     else delete places[id];
     rail = { ...rail, places };
     railChanged();
-    return c.json(rail);
+    return c.json(railView());
   });
 
   // Driving a session from outside (session-control-routes.ts): a message is a published comment, as for real.
@@ -997,11 +1030,7 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
   });
   app.delete('/api/groups/:name', (c) => repoAnswer(c, () => repoModel.deleteGroup(c.req.param('name'), c.req.query('force') === '1')));
   // Settings: work's and each repo's, a pretend config.json in memory, by the real rules (demo-settings.ts).
-  mountDemoSettings(
-    app,
-    (event, data) => broadcast({ event, data }),
-    createDemoSettings((alias) => repoModel.inventory().repos.find((r) => r.alias === alias && r.status !== 'new')?.path ?? null),
-  );
+  mountDemoSettings(app, (event, data) => broadcast({ event, data }), demoSettings);
   // Updates: the demo is current, with two releases' notes to read.
   const demoNotes: ReleaseNote[] = [
     {
@@ -1194,11 +1223,18 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
   app.get('/api/activity', (c) => c.json(activity.log.snapshot()));
   app.get('/api/prs', (c) => c.json({ prs: scenario.prs() }));
   app.get('/api/jira', (c) => c.json({ available: true, issues: scenario.jira() }));
+  app.get('/api/issues', (c) =>
+    c.json({
+      sources: [{ id: 'jira', name: 'Jira', available: true }],
+      issues: scenario.jira().map((i) => ({ source: 'jira', ...i })),
+    } satisfies IssuesWire),
+  );
 
   // The Jira watch, in memory: the switch works; nothing is ever started.
   let jiraWatch: JiraWatchState['settings'] = { enabled: false, since: null };
   const jiraDecisions: JiraDecision[] = [];
-  app.get('/api/jira/watch', (c) =>
+  const watchAt = (tail = '') => [`/api/issues/watch${tail}`, `/api/jira/watch${tail}`];
+  app.on('GET', watchAt(), (c) =>
     c.json({
       settings: jiraWatch,
       decisions: jiraDecisions,
@@ -1207,14 +1243,14 @@ export async function startDemoServer(opts: DemoServerOptions): Promise<DiffServ
       nextRunAt: null,
     } satisfies JiraWatchState),
   );
-  app.put('/api/jira/watch', async (c) => {
+  app.on('PUT', watchAt(), async (c) => {
     const body = await json(c);
     if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled (true/false) required' }, 400);
     jiraWatch = { enabled: body.enabled, since: body.enabled ? new Date().toISOString() : null };
     return c.json({ settings: jiraWatch });
   });
-  app.post('/api/jira/watch/:key/start', (c) => c.json({ error: 'the demo starts nothing' }, 400));
-  app.post('/api/jira/watch/:key/dismiss', (c) => {
+  app.on('POST', watchAt('/:key/start'), (c) => c.json({ error: 'the demo starts nothing' }, 400));
+  app.on('POST', watchAt('/:key/dismiss'), (c) => {
     const d = jiraDecisions.find((x) => x.key === c.req.param('key'));
     if (!d) return c.json({ error: 'no such issue' }, 404);
     d.action = 'dismissed';

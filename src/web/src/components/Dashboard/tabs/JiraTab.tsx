@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { columnOrder } from '../../../../../core/jira/jira-board.js';
 import {
   dismissJiraIssue,
-  fetchJira,
   fetchJiraWatch,
+  fetchIssueList,
   setJiraWatch,
   startJiraIssue,
   type JiraDecision,
@@ -15,6 +15,7 @@ import { useSse } from '../../../api/events.js';
 import { isArchived } from '../../../state/session-display.js';
 import { sessionIsForIssue } from '../../../../../core/jira/jira-prompt.js';
 import { timeAgo } from '../../../utils/time.js';
+import { Button, PageHeader, Select } from '../../../ui/index.js';
 
 interface Props {
   sessions: SessionSummary[];
@@ -22,7 +23,7 @@ interface Props {
   onPickIssue: (issue: JiraIssue) => void;
   onOpenSession: (id: string) => void;
   /** Test seam; defaults to the API. */
-  loadJira?: typeof fetchJira;
+  loadJira?: typeof fetchIssueList;
 }
 
 /** The live session made for this issue, if any. Pure. */
@@ -36,9 +37,13 @@ export function sessionForIssue(issue: JiraIssue, sessions: SessionSummary[]): S
  * session already on it; and the switch that starts newly assigned issues
  * by themselves (the Jira watch), with what it did with each.
  */
-export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetchJira }: Props) {
+export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetchIssueList }: Props) {
   const [issues, setIssues] = useState<JiraIssue[] | null>(null);
   const [jiraNote, setJiraNote] = useState<string | null>(null);
+  /** Where the list is from, by name (the connectors that could be asked). */
+  const [from, setFrom] = useState<string[]>(['Jira']);
+  /** A connector that couldn't be asked while others could. */
+  const [partNote, setPartNote] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -47,7 +52,10 @@ export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetch
         (r) => {
           if (!live) return;
           setIssues(r.issues);
-          setJiraNote(r.available === false ? 'acli isn’t available or logged in.' : (r.error ?? null));
+          if (r.from?.length) setFrom(r.from);
+          // None could be asked: say why in place of the list. Some could: the list, with the note above it.
+          setJiraNote(r.available === false ? (r.error ?? 'acli isn’t available or logged in.') : null);
+          setPartNote(r.available === false ? null : (r.error ?? null));
         },
         (err: Error) => live && setJiraNote(err.message),
       );
@@ -96,26 +104,28 @@ export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetch
   }, [issues]);
   const existing = (s: SessionSummary | undefined) =>
     s ? (
-      <button type="button" className="wd-link-button wd-start-existing" onClick={() => onOpenSession(s.id)} title="Open the session on it">
+      <Button variant="link" className="wd-start-existing" onClick={() => onOpenSession(s.id)} title="Open the session on it">
         {s.titleIsYours && s.title ? s.title : s.branch} →
-      </button>
+      </Button>
     ) : null;
 
   return (
     <div className="wd-dash-tab-pane wd-tab-jira">
-      <header className="wd-tab-header">
-        <h1>Jira {issues !== null && !jiraNote && <span className="wd-tab-header-muted">{ordered.length} assigned to you</span>}</h1>
-      </header>
+      <PageHeader
+        title="Issues"
+        meta={issues !== null && !jiraNote ? `${ordered.length} assigned to you · from ${from.join(', ')}` : undefined}
+      />
 
       <section className="wd-start-section" aria-label="Jira issues assigned to you">
         {jiraNote && <p className="wd-start-note">{jiraNote}</p>}
+        {partNote && <p className="wd-start-note">{partNote}</p>}
         {!jiraNote && issues === null && <p className="wd-start-note">Loading…</p>}
         {!jiraNote && issues !== null && ordered.length === 0 && <p className="wd-start-note">Nothing assigned to you.</p>}
         <ul className="wd-start-list">
           {ordered.map((i) => {
             const decision = decisions.get(i.key);
             return (
-              <li key={i.key} className="wd-start-row">
+              <li key={`${i.source ?? 'jira'}:${i.key}`} className="wd-start-row">
                 <a className="wd-start-key" href={i.url} target="_blank" rel="noreferrer" title="Open in Jira">
                   {i.key}
                 </a>
@@ -125,9 +135,12 @@ export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetch
                 <span className="wd-start-state">{i.status}</span>
                 <span className="wd-start-action">
                   {existing(sessionForIssue(i, sessions)) ?? (
-                    <button type="button" className="wd-btn-secondary" onClick={() => onPickIssue(i)}>
-                      Start
-                    </button>
+                    <Button
+                      onClick={() => onPickIssue(i)}
+                      title={i.startsIn ? `Starts in ${i.startsIn} (your issue rules, Settings → Issues)` : undefined}
+                    >
+                      {i.startsIn ? `Start in ${i.startsIn}` : 'Start'}
+                    </Button>
                   )}
                 </span>
                 {decision && (
@@ -148,7 +161,7 @@ export function JiraTab({ sessions, onPickIssue, onOpenSession, loadJira = fetch
         <div className="wd-start-watch">
           <label
             className="wd-jira-watch-switch"
-            title="When an issue is assigned to you, an AI picks the project it belongs in and work starts a session on it (feat/<KEY>). Not sure, it suggests one here for you to start. Issues assigned before you turned it on are left alone."
+            title="When an issue is assigned to you and one of your rules for it says (auto) (Settings → Issues → Issues start in), work starts a session on it (feat/<KEY>) in that rule's project. Any other new issue is listed here with the project it would go in, for you to start. Issues assigned before you turned it on are left alone."
           >
             <input type="checkbox" checked={watch.settings.enabled} disabled={switching} onChange={(e) => toggle(e.target.checked)} /> Start
             newly assigned Jira issues by themselves
@@ -201,9 +214,9 @@ function WatchDecision({
       <span className="wd-jira-watch wd-jira-watch-started" title={d.reason}>
         ▶ started by itself in {d.target}
         {d.sessionId && onOpenSession && (
-          <button type="button" className="wd-link-button" onClick={() => onOpenSession(d.sessionId!)}>
+          <Button variant="link" onClick={() => onOpenSession(d.sessionId!)}>
             open
-          </button>
+          </Button>
         )}
       </span>
     );
@@ -214,33 +227,24 @@ function WatchDecision({
         <span title={d.reason}>
           {d.action === 'failed'
             ? `⚠ couldn't start it: ${d.reason}`
-            : `? not sure where it belongs${d.target ? ` — maybe ${d.target}` : ''}`}
+            : d.target
+              ? `not started by itself — it would go in ${d.target}`
+              : '? not sure where it belongs'}
         </span>
         <span className="wd-jira-watch-actions">
-          <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={busy} aria-label={`Project for ${d.key}`}>
+          <Select compact value={target} onChange={(e) => setTarget(e.target.value)} disabled={busy} aria-label={`Project for ${d.key}`}>
             {targets.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>
             ))}
-          </select>
-          <button
-            type="button"
-            className="wd-btn-primary"
-            disabled={busy || !target}
-            onClick={() => run(() => startJiraIssue(d.key, target))}
-          >
+          </Select>
+          <Button variant="primary" size="sm" disabled={busy || !target} onClick={() => run(() => startJiraIssue(d.key, target))}>
             {busy ? 'Starting…' : `Start in ${target || '…'}`}
-          </button>
-          <button
-            type="button"
-            className="wd-btn-secondary"
-            disabled={busy}
-            onClick={() => run(() => dismissJiraIssue(d.key))}
-            title="Not this one"
-          >
+          </Button>
+          <Button size="sm" disabled={busy} onClick={() => run(() => dismissJiraIssue(d.key))} title="Not this one">
             Dismiss
-          </button>
+          </Button>
         </span>
         {error && <span className="wd-jira-watch-error">{error}</span>}
       </div>

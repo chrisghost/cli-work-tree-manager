@@ -9,6 +9,7 @@ import {
   fetchSessionReviewDiff,
   prepareSessionReview,
   sendSessionReviewNotes,
+  sendSessionReviewRecommendation,
   type SessionSummary,
 } from '../../../api/client.js';
 import { draftsAsComments } from '../../../api/review-drafts-api.js';
@@ -20,7 +21,9 @@ import { HostThreadsProvider } from '../../../state/HostThreads.js';
 import { commentWalk, reviewPages } from '../../../state/review-view.js';
 import { sessionReviewPagePath } from '../../../state/session-review-page.js';
 import { toggled } from '../../../state/review-prefs.js';
+import { Input, Segmented, Select } from '../../../ui/index.js';
 import { ReviewOverview } from './review/ReviewOverview.js';
+import { ReviewFreshness } from './review/ReviewFreshness.js';
 import { StoryPager } from './review/StoryPager.js';
 import { CommentWalk } from './review/CommentWalk.js';
 import { FilesView } from './review/FilesView.js';
@@ -87,6 +90,8 @@ export function SessionReviewTab({
   const [file, setFile] = useState<string | undefined>(undefined);
   const [viewed, setViewed] = useState<Set<string>>(new Set());
   const [looked, setLooked] = useState<Set<string>>(new Set());
+  /** What you typed for this one review; null: not typed yet (the kept review's shows). */
+  const [also, setAlso] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<string | null>(null);
   /** The changes have moved since the review was prepared (asked again every minute while the tab is open). */
@@ -183,9 +188,11 @@ export function SessionReviewTab({
   }, [dismiss]);
   const hostThreads = useMemo(() => ({ inline: new Map() }), []);
 
+  // What this one review should also pay attention to: what the kept one was asked, until you type.
+  const alsoText = also ?? data?.also ?? '';
   const prepare = (repo?: string) => {
     setError(null);
-    prepareSessionReview(id, repo).then(setData, (e: Error) => setError(e.message));
+    prepareSessionReview(id, repo, alsoText).then(setData, (e: Error) => setError(e.message));
   };
   const unsent = unsentNotes(walk, sentIds);
   /** Hand these notes to the session's agent: the ones left, or the one whose Send was clicked. */
@@ -256,7 +263,7 @@ export function SessionReviewTab({
           </p>
           <div className="wd-review-actions">
             {data.repos.length > 1 && (
-              <select
+              <Select
                 aria-label="Repo to review"
                 value={data.repo ?? ''}
                 disabled={running}
@@ -269,7 +276,7 @@ export function SessionReviewTab({
                     {name}
                   </option>
                 ))}
-              </select>
+              </Select>
             )}
             {r && walk.length > 0 && !archived && (
               <button
@@ -292,6 +299,21 @@ export function SessionReviewTab({
               >
                 Open in browser ↗
               </a>
+            )}
+            {!archived && (
+              <Input
+                className="wd-session-review-also"
+                aria-label="For this review, also pay attention to"
+                placeholder="For this review, also pay attention to…"
+                title="Only this review is told it, beside the points set for every review (Settings → Reviews). Enter prepares."
+                value={alsoText}
+                maxLength={2000}
+                disabled={running}
+                onChange={(e) => setAlso(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') prepare(data.repo ?? undefined);
+                }}
+              />
             )}
             {!archived && (
               <button type="button" className="wd-btn-primary" onClick={() => prepare(data.repo ?? undefined)} disabled={running}>
@@ -317,6 +339,12 @@ export function SessionReviewTab({
             </button>
           </p>
         )}
+        <ReviewFreshness
+          status={data.status}
+          {...(data.at ? { at: data.at } : {})}
+          {...(r ? { preparedAt: r.preparedAt ?? r.at } : {})}
+          why={data.error ?? null}
+        />
         {moved && !running && (
           <p className="wd-start-note wd-session-review-moved" role="status">
             The changes have moved since this was prepared: a note may be about code that is different now. <strong>Prepare again</strong>{' '}
@@ -335,19 +363,14 @@ export function SessionReviewTab({
           </p>
         )}
         {r && (
-          <div className="wd-review-modes" role="tablist" aria-label="Read the review">
-            {modes.map(([m, label]) => (
-              <button
-                key={m}
-                type="button"
-                role="tab"
-                aria-selected={mode === m}
-                className={mode === m ? 'wd-seg wd-seg-on' : 'wd-seg'}
-                onClick={() => go(m, m === 'story' ? storyIndex : m === 'comments' ? commentIndex : 0)}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="wd-review-modes">
+            <Segmented
+              kind="tabs"
+              label="Read the review"
+              value={mode}
+              onChange={(m) => go(m, m === 'story' ? storyIndex : m === 'comments' ? commentIndex : 0)}
+              options={modes.map(([m, label]) => ({ value: m, label }))}
+            />
           </div>
         )}
       </header>
@@ -361,7 +384,7 @@ export function SessionReviewTab({
       {r && (
         <ReviewProvider key={`${signature}:${removed.size}`} api={api}>
           <HostThreadsProvider value={hostThreads}>
-            <div className="wd-review-mode-body">
+            <div className={`wd-review-mode-body${running ? ' wd-review-stale' : ''}`} inert={running}>
               {mode === 'overview' && (
                 <ReviewOverview
                   review={r}
@@ -373,7 +396,9 @@ export function SessionReviewTab({
                   onComment={(i) => go('comments', i)}
                   onClearDropped={() => undefined}
                   onFiles={() => go('files')}
-                  {...(archived ? {} : { noteActions })}
+                  {...(archived
+                    ? {}
+                    : { noteActions, onDecide: (decision: string) => sendSessionReviewRecommendation(id, decision).then(() => undefined) })}
                 />
               )}
               {mode === 'story' && (

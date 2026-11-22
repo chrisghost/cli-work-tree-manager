@@ -3,9 +3,12 @@
  *
  * The rail's pins and sections: a few sessions pinned to the top, and your
  * own headings ("Client X", "Waiting on review") with sessions under them.
- * Stored in state.db (rail-store.ts): the sections in `meta`, each session's
- * place in `rail_place` (gone with the session). Within a group, rows keep
- * the rail's order (your drag order, else the stable one).
+ * And colors: a mark you put on a session that moves nothing (a bar down its
+ * rail row's edge, a square in the lists), so a group of yours stays visible
+ * wherever its sessions are, pinned or in a section. Stored in state.db
+ * (rail-store.ts): the sections in `meta`, each session's place in
+ * `rail_place` (gone with the session). Within a group, rows keep the rail's
+ * order (your drag order, else the stable one).
  */
 
 export interface RailSection {
@@ -13,16 +16,37 @@ export interface RailSection {
   name: string;
 }
 
-/** Where one session sits: pinned wins over a section. */
+/** Finder's six: told apart at a glance, a light and a dark shade each (the SPA's `--tag-<color>`). */
+export const RAIL_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+export type RailColor = (typeof RAIL_COLORS)[number];
+
+/** Each color's name, for its tooltip and screen readers (never the color alone). */
+export const RAIL_COLOR_LABEL: Record<RailColor, string> = {
+  red: 'Red',
+  orange: 'Orange',
+  yellow: 'Yellow',
+  green: 'Green',
+  blue: 'Blue',
+  purple: 'Purple',
+};
+
+export function isRailColor(v: unknown): v is RailColor {
+  return typeof v === 'string' && (RAIL_COLORS as readonly string[]).includes(v);
+}
+
+/** Where one session sits (pinned wins over a section), and its color. */
 export interface RailPlace {
   pinned?: boolean;
   section?: string;
+  color?: RailColor;
 }
 
 export interface RailLayout {
   sections: RailSection[];
   /** By session id; a session without one is in no section and not pinned. */
   places: Record<string, RailPlace>;
+  /** A project's colour (a repo alias or a group's name → colour; config `colors`): its sessions' colour unless one has its own. */
+  projectColors?: Record<string, RailColor>;
 }
 
 export const EMPTY_RAIL_LAYOUT: RailLayout = { sections: [], places: {} };
@@ -67,18 +91,22 @@ export function groupRail<T extends { id: string }>(list: readonly T[], layout: 
   return out;
 }
 
-/** What dropping a row into a group means for its place. */
+/** What dropping a row into a group means for its place (its color stays). */
 export function placeForGroup(group: Pick<RailGroup<unknown>, 'key' | 'sectionId'>): PlacePatch {
   if (group.key === 'pinned') return { pinned: true };
   if (group.sectionId) return { pinned: false, section: group.sectionId };
   return { pinned: false, section: null };
 }
 
-/** A change to one session's place; `section: null` takes it out of its section. */
+/** A change to one session's place; `section: null` takes it out of its section, `color: null` its color off. */
 export interface PlacePatch {
   pinned?: boolean;
   section?: string | null;
+  color?: RailColor | null;
 }
+
+/** What a refused place change is told (both servers). */
+export const PLACE_PATCH_EXPECTED = `expected {pinned?: boolean, section?: string | null, color?: ${RAIL_COLORS.join(' | ')} | null}`;
 
 /** Validate a PUT body's place change; null when it isn't one. */
 export function cleanPlacePatch(raw: unknown): PlacePatch | null {
@@ -93,7 +121,11 @@ export function cleanPlacePatch(raw: unknown): PlacePatch | null {
     if (o.section !== null && (typeof o.section !== 'string' || !o.section || o.section.length > 64)) return null;
     out.section = o.section as string | null;
   }
-  return 'pinned' in out || 'section' in out ? out : null;
+  if ('color' in o) {
+    if (o.color !== null && !isRailColor(o.color)) return null;
+    out.color = o.color;
+  }
+  return 'pinned' in out || 'section' in out || 'color' in out ? out : null;
 }
 
 /** The place after a patch, or null when it is back to nowhere (no row to keep). */
@@ -107,7 +139,11 @@ export function applyPlacePatch(prev: RailPlace | undefined, patch: PlacePatch):
     if (patch.section) next.section = patch.section;
     else delete next.section;
   }
-  return next.pinned || next.section ? next : null;
+  if (patch.color !== undefined) {
+    if (patch.color) next.color = patch.color;
+    else delete next.color;
+  }
+  return next.pinned || next.section || next.color ? next : null;
 }
 
 /** Validate the section list (names trimmed, ids unique, bounded); null when it isn't one. */
@@ -133,7 +169,8 @@ export function asRailPlace(v: unknown): RailPlace | null {
   const out: RailPlace = {};
   if (o.pinned === true) out.pinned = true;
   if (typeof o.section === 'string' && o.section) out.section = o.section;
-  return out.pinned || out.section ? out : null;
+  if (isRailColor(o.color)) out.color = o.color;
+  return out.pinned || out.section || out.color ? out : null;
 }
 
 /**
@@ -183,4 +220,21 @@ export function applySectionOp(
 /** A short random id for a new section (ids only need to be unique among yours). */
 export function newSectionId(): string {
   return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/**
+ * The colour a session shows: its own (you coloured it), else its project's (asked for: a default colour per repo, to
+ * tell projects apart). None: no colour. Pure.
+ */
+export function sessionColor(
+  layout: Pick<RailLayout, 'places' | 'projectColors'> | null | undefined,
+  s: { id: string; target: string },
+): RailColor | undefined {
+  return layout?.places[s.id]?.color ?? layout?.projectColors?.[s.target];
+}
+
+/** A config's `colors` as project colours: only names with one of the six. Pure. */
+export function projectColorsOf(raw: unknown): Record<string, RailColor> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter((e): e is [string, RailColor] => isRailColor(e[1])));
 }

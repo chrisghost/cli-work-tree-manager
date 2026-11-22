@@ -58,6 +58,9 @@ export interface SettingField {
  * same, so what it saves is what work uses. `tests/core/settings` checks them against the readers.
  */
 export const SETTING_PATTERNS = {
+  /** A line of `issues.rules` (issue-place.ts's parseIssueRule reads the same shape; a GitHub scope is owner/repo). */
+  issueRule:
+    '^\\s*(?:(?:jira|azure)\\s*:\\s*[^/\\s][^/]*(?:/\\s*\\S.*?)?|github\\s*:\\s*[^/\\s]+/[^/\\s]+)\\s*(?:->|→|=>)\\s*[^\\s(][^(]*?(?:\\s*\\(\\s*(?:[Aa][Uu][Tt][Oo]|[Aa][Ss][Kk])\\s*\\))?\\s*$',
   issueKey: '^[A-Z][A-Z0-9]{1,9}-\\d+$',
   project: '^[A-Z][A-Z0-9]{1,9}$',
   customField: '^customfield_\\d+$',
@@ -65,14 +68,14 @@ export const SETTING_PATTERNS = {
   envName: '^[A-Za-z_][A-Za-z0-9_]*$',
 } as const;
 
-export type SettingSection = 'General' | 'Agents & terminals' | 'Pull requests' | 'Reviews' | 'Jira' | 'Time' | 'Archive & usage';
+export type SettingSection = 'General' | 'Agents & terminals' | 'Pull requests' | 'Reviews' | 'Issues' | 'Time' | 'Archive & usage';
 
 export const SETTING_SECTIONS: readonly SettingSection[] = [
   'General',
   'Agents & terminals',
   'Pull requests',
   'Reviews',
-  'Jira',
+  'Issues',
   'Time',
   'Archive & usage',
 ];
@@ -184,6 +187,21 @@ export const SETTINGS: readonly SettingField[] = [
     kind: { type: 'list', placeholder: 'JAVA_HOME', pattern: SETTING_PATTERNS.envName, patternError: "isn't a variable's name" },
     default: [],
   },
+  {
+    path: 'claudeStatusLine',
+    section: 'Agents & terminals',
+    label: 'Status line under each Claude',
+    help: "work's: the model and how full its context is, the account, the folder and the branch, drawn by work with nothing started. Yours: the one in your Claude settings, run as before. Your settings are never changed.",
+    kind: {
+      type: 'choice',
+      options: [
+        { value: 'own', label: 'Yours (from your Claude settings)' },
+        { value: 'work', label: "work's" },
+      ],
+    },
+    default: 'own',
+    when: 'at the next refresh (on the Claudes work starts)',
+  },
   bool(
     'useBundledConpty',
     'Agents & terminals',
@@ -277,18 +295,32 @@ export const SETTINGS: readonly SettingField[] = [
     kind: { type: 'number', min: 1, max: 1_000_000 },
     default: 3000,
   },
-  // ---- Jira
+  // ---- Issues
+  {
+    path: 'issues.rules',
+    section: 'Issues',
+    label: 'Issues start in',
+    help: 'Which of your projects (a repo or a group) an issue’s work starts in, one rule a line: "jira:PAY -> api" (every issue of the Jira project PAY), "jira:SHOP/checkout -> shop" (issues of SHOP with that component or label; the narrower rule wins), "github:acme/web -> shop" (issues of that GitHub repo). Start on the Issues tab opens with that project filled in. Add "(auto)" after the project — "jira:PAY -> api (auto)" — to let the watch start a newly assigned issue of that rule by itself; nothing starts by itself without it. An issue with no (auto) rule is listed with the project it would go in, for you to start.',
+    kind: {
+      type: 'list',
+      placeholder: 'e.g. jira:PAY -> api',
+      pattern: SETTING_PATTERNS.issueRule,
+      patternError: 'isn’t a rule: write source:scope -> project, optionally followed by (auto); the source is one of jira, github, azure',
+    },
+    default: [],
+    when: 'the next issue started',
+  },
   {
     path: 'jiraWatch.maxPerDay',
-    section: 'Jira',
+    section: 'Issues',
     label: 'Most issues the Jira watch starts a day',
-    help: 'Newly assigned issues it starts by itself (when it is on, on the Jira tab).',
+    help: 'Newly assigned issues it starts by itself (when it is on, on the Issues tab).',
     kind: { type: 'number', min: 0, max: 100 },
     default: 5,
   },
   {
     path: 'jiraWorklog.site',
-    section: 'Jira',
+    section: 'Issues',
     label: 'Jira site for worklogs',
     help: 'Where → PAY-12 writes a worklog, e.g. yourcompany.atlassian.net.',
     kind: { type: 'text', placeholder: 'yourcompany.atlassian.net' },
@@ -296,7 +328,7 @@ export const SETTINGS: readonly SettingField[] = [
   },
   {
     path: 'jiraWorklog.email',
-    section: 'Jira',
+    section: 'Issues',
     label: 'Your Jira email',
     help: 'Who the worklog is written as.',
     kind: { type: 'text' },
@@ -304,7 +336,7 @@ export const SETTINGS: readonly SettingField[] = [
   },
   {
     path: 'jiraWorklog.tokenEnv',
-    section: 'Jira',
+    section: 'Issues',
     label: 'Environment variable with the API token',
     help: 'The token itself is never stored here.',
     kind: { type: 'text', placeholder: 'JIRA_API_TOKEN' },
@@ -565,6 +597,8 @@ export interface RepoSettingsValues {
   reviews: ReviewMode | null;
   /** What reviews of it pay attention to, besides every review's list (`reviews.focusFor[alias]`); null: nothing more. */
   reviewFocus: string[] | null;
+  /** Its sessions' colour unless one has its own (`colors[alias]`); null: none. */
+  color: RailColor | null;
 }
 
 export type RepoSettingKey = keyof RepoSettingsValues;
@@ -575,6 +609,7 @@ export const REPO_SETTING_PATH: Record<RepoSettingKey, string> = {
   devCommand: 'devCommands',
   reviews: 'reviews.projects',
   reviewFocus: 'reviews.focusFor',
+  color: 'colors',
 };
 
 /** A repo setting's value to write, checked; `null`: take it out. Pure. */
@@ -586,6 +621,7 @@ export function checkRepoSetting(key: RepoSettingKey, raw: unknown): { ok: true;
     return (r.value as string[]).length ? r : { ok: true, value: null };
   }
   if (key === 'devCommand') return checkSetting({ ...SETTINGS[0], kind: { type: 'text' } }, raw);
+  if (key === 'color') return isRailColor(raw) ? { ok: true, value: raw } : { ok: false, error: RAIL_COLORS.join(', ') };
   return raw === 'all' || raw === 'asked' || raw === 'off' ? { ok: true, value: raw } : { ok: false, error: 'all, asked or off' };
 }
 
@@ -599,11 +635,14 @@ export function repoSettingsOf(raw: unknown, alias: string): RepoSettingsValues 
   const dev = map(REPO_SETTING_PATH.devCommand)[alias];
   const review = map(REPO_SETTING_PATH.reviews)[alias];
   const focus = map(REPO_SETTING_PATH.reviewFocus)[alias];
+  const color = map(REPO_SETTING_PATH.color)[alias];
   return {
     requiredChecks: Array.isArray(checks) ? checks.filter((c): c is string => typeof c === 'string') : null,
     devCommand: typeof dev === 'string' && dev ? dev : null,
     reviews: review === 'all' || review === 'asked' || review === 'off' ? review : null,
     reviewFocus:
       Array.isArray(focus) && focus.some((c) => typeof c === 'string') ? focus.filter((c): c is string => typeof c === 'string') : null,
+    color: isRailColor(color) ? color : null,
   };
 }
+import { isRailColor, RAIL_COLORS, type RailColor } from '../rail/rail-layout.js';

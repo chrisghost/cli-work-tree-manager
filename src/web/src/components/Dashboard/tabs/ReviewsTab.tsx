@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Input, ListRow, PageHeader, SectionTitle, Segmented, Select, TextArea, Badge } from '../../../ui/index.js';
 import type { PrReviewWire, ReviewEvent, ReviewMode, ReviewSettingsWire, ReviewsWire } from '../../../../../core/api-types.js';
 import type { ParsedFile } from '../../../../../core/diff/diff-parse.js';
 import { hostName } from '../../../../../core/hosts/commands.js';
@@ -19,6 +20,8 @@ import { isStaleRunning, nothingToSubmit, shownDoubt, submitBlocked } from '../.
 import { reviewDraftsApi } from '../../../api/review-drafts-api.js';
 import { useSse } from '../../../api/events.js';
 import { timeAgo } from '../../../utils/time.js';
+import { ReviewFreshness } from './review/ReviewFreshness.js';
+import { isNewReview, markSeen, newReviews, readSeen, seedSeen, writeSeen, type ReviewsSeen } from '../../../state/reviews-seen.js';
 import { ReviewProvider } from '../../../state/ReviewProvider.js';
 import { ResizeDivider, useResizableSize, type ResizeSpec } from '../../Layout/ResizeDivider.js';
 import {
@@ -29,6 +32,7 @@ import {
   notPreparedLine,
   pendingDrafts,
   reviewPages,
+  showsReview,
 } from '../../../state/review-view.js';
 import type { ReviewRoute } from '../../../state/dashboard-route.js';
 import { reviewActionFor } from '../../../state/shortcuts.js';
@@ -129,6 +133,24 @@ export function ReviewsTab({ route, onRoute, railFolded, onToggleRail, onShown, 
   useEffect(load, [load]);
   useSse('/events', { events: { 'reviews-changed': load } });
   const groups = useMemo(() => groupReviews(list?.reviews ?? [], group), [list, group]);
+  // "new": ready since you last opened it (per browser). The first list seeds it: nothing is new to begin with.
+  const [seen, setSeen] = useState<ReviewsSeen | null>(() => readSeen());
+  useEffect(() => {
+    if (!list || seen) return;
+    const first = seedSeen(list.reviews);
+    setSeen(first);
+    writeSeen(first);
+  }, [list, seen]);
+  const marks = useMemo(() => (list && seen ? newReviews(list.reviews, seen) : new Set<string>()), [list, seen]);
+  // Opened (or became ready while open): seen as it is now.
+  const openRow = selected && list ? list.reviews.find((x) => x.repo === selected.repo && x.number === selected.number) : undefined;
+  useEffect(() => {
+    if (!openRow || openRow.status !== 'ready' || !seen) return;
+    const next = markSeen(seen, openRow);
+    if (next === seen) return;
+    setSeen(next);
+    writeSeen(next);
+  }, [openRow, seen]);
   const shownPr = selected ? { repo: selected.repo, number: selected.number } : null;
   useEffect(() => onShown?.(shownPr), [shownPr?.repo, shownPr?.number, onShown]); // eslint-disable-line react-hooks/exhaustive-deps -- by value: a new object each render
   const pickGroup = (g: 'repo' | 'none') => {
@@ -150,76 +172,82 @@ export function ReviewsTab({ route, onRoute, railFolded, onToggleRail, onShown, 
     >
       {showList && (
         <aside className="wd-reviews-list" aria-label="Pull requests to review">
-          <div className="wd-reviews-head">
-            <h2 className="wd-start-title">Reviews</h2>
-            <button type="button" className="wd-link-button" onClick={() => setShowSettings((v) => !v)}>
+          <PageHeader
+            compact={!!selected}
+            title="Reviews"
+            meta={list ? `${list.today} prepared today${list.maxPerDay !== null ? ` of ${list.maxPerDay}` : ''}` : undefined}
+          >
+            <span className="wd-reviews-grouping">
+              Group
+              <Segmented
+                label="Group the reviews"
+                value={group}
+                onChange={pickGroup}
+                options={[
+                  { value: 'repo', label: 'Repo' },
+                  { value: 'none', label: 'None' },
+                ]}
+              />
+            </span>
+            <Button variant="link" onClick={() => setShowSettings((v) => !v)}>
               {showSettings ? 'Close settings' : 'Which PRs…'}
-            </button>
+            </Button>
+          </PageHeader>
+          <div className="wd-reviews-list-body">
+            {error && <p className="wd-modal-error">{error}</p>}
+            {!error && list === null && <p className="wd-start-note">Loading…</p>}
+            {list && list.reviews.length === 0 && (
+              <p className="wd-start-note">No reviews yet: open pull requests of your repos are prepared here in the background.</p>
+            )}
+            {groups.map((g) => (
+              <section key={g.repo ?? 'all'} className="wd-reviews-group">
+                {g.repo && (
+                  <SectionTitle
+                    as="h3"
+                    className="wd-reviews-group-head"
+                    meta={`· ${g.reviews.length}${g.host ? ` · ${hostName(g.host)}` : ''}`}
+                  >
+                    {g.repo}
+                  </SectionTitle>
+                )}
+                <ul>
+                  {g.reviews.map((r) => (
+                    <li key={`${r.repo}#${r.number}`}>
+                      <ListRow
+                        className="wd-reviews-row"
+                        active={selected?.repo === r.repo && selected.number === r.number}
+                        title={`${g.repo ? '' : `${r.repo} `}#${r.number} · ${r.title}`}
+                        meta={
+                          <>
+                            {isNewReview(marks, r) && (
+                              <Badge kind="status" tone="accent" className="wd-reviews-new" title="Prepared since you last opened it">
+                                new
+                              </Badge>
+                            )}{' '}
+                            <span className={`wd-reviews-status wd-reviews-status-${r.status}`}>{STATUS_LABEL[r.status]}</span> @{r.author}{' '}
+                            · +{r.size.added} −{r.size.deleted}
+                            {r.status === 'ready' && ` · ${r.stories} stor${r.stories === 1 ? 'y' : 'ies'}`}
+                            {r.flags > 0 && ` · ${r.flags} flag${r.flags === 1 ? '' : 's'}`}
+                            {r.gaps > 0 && ` · ${r.gaps} untested`} · {timeAgo(r.at)}
+                          </>
+                        }
+                        onClick={() => {
+                          go({
+                            repo: r.repo,
+                            number: r.number,
+                            mode: 'overview',
+                            at: 0,
+                          });
+                          setShowSettings(false);
+                          setListOpen(false);
+                        }}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
           </div>
-          <div className="wd-reviews-grouping" role="group" aria-label="Group the reviews">
-            Group:{' '}
-            <button type="button" className={group === 'repo' ? 'wd-seg wd-seg-on' : 'wd-seg'} onClick={() => pickGroup('repo')}>
-              Repo
-            </button>
-            <button type="button" className={group === 'none' ? 'wd-seg wd-seg-on' : 'wd-seg'} onClick={() => pickGroup('none')}>
-              None
-            </button>
-          </div>
-          {list && (
-            <p className="wd-start-note">
-              {list.today} prepared today
-              {list.maxPerDay !== null ? ` of ${list.maxPerDay}` : ''}
-            </p>
-          )}
-          {error && <p className="wd-modal-error">{error}</p>}
-          {!error && list === null && <p className="wd-start-note">Loading…</p>}
-          {list && list.reviews.length === 0 && (
-            <p className="wd-start-note">No reviews yet: open pull requests of your repos are prepared here in the background.</p>
-          )}
-          {groups.map((g) => (
-            <section key={g.repo ?? 'all'} className="wd-reviews-group">
-              {g.repo && (
-                <h3 className="wd-reviews-group-head">
-                  {g.repo}{' '}
-                  <span className="wd-start-note">
-                    · {g.reviews.length}
-                    {g.host ? ` · ${hostName(g.host)}` : ''}
-                  </span>
-                </h3>
-              )}
-              <ul>
-                {g.reviews.map((r) => (
-                  <li key={`${r.repo}#${r.number}`}>
-                    <button
-                      type="button"
-                      className={`wd-reviews-row${selected?.repo === r.repo && selected.number === r.number ? ' wd-reviews-row-active' : ''}`}
-                      onClick={() => {
-                        go({
-                          repo: r.repo,
-                          number: r.number,
-                          mode: 'overview',
-                          at: 0,
-                        });
-                        setShowSettings(false);
-                        setListOpen(false);
-                      }}
-                    >
-                      <span className="wd-reviews-row-title">
-                        {g.repo ? '' : `${r.repo} `}#{r.number} · {r.title}
-                      </span>
-                      <span className="wd-reviews-row-meta">
-                        <span className={`wd-reviews-status wd-reviews-status-${r.status}`}>{STATUS_LABEL[r.status]}</span> @{r.author} · +
-                        {r.size.added} −{r.size.deleted}
-                        {r.status === 'ready' && ` · ${r.stories} stor${r.stories === 1 ? 'y' : 'ies'}`}
-                        {r.flags > 0 && ` · ${r.flags} flag${r.flags === 1 ? '' : 's'}`}
-                        {r.gaps > 0 && ` · ${r.gaps} untested`} · {timeAgo(r.at)}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ))}
         </aside>
       )}
       {showList && selected && <ResizeDivider layoutRef={layoutRef} size={listWidth} onCommit={setListWidth} spec={LIST_SPEC} />}
@@ -277,6 +305,8 @@ function ReviewView({
   const [error, setError] = useState<string | null>(null);
   const [files, setFiles] = useState<ParsedFile[] | null>(null);
   const [busy, setBusy] = useState(false);
+  /** What this one review is also asked to pay attention to (kept while the PR is open on screen). */
+  const [also, setAlso] = useState('');
   const [viewed, setViewed] = useState<Set<string>>(new Set());
   const [looked, setLooked] = useState<Set<string>>(new Set());
   const load = useCallback(() => {
@@ -349,7 +379,7 @@ function ReviewView({
   if (!r) return <p className="wd-start-note">Loading…</p>;
   const prepare = () => {
     setBusy(true);
-    prepareReview(repo, number)
+    prepareReview(repo, number, also)
       .then(setR, (e: Error) => setError(e.message))
       .finally(() => setBusy(false));
   };
@@ -371,7 +401,10 @@ function ReviewView({
       writeMarks(marksKey('looked', r), next);
       return next;
     });
-  const ready = r.status === 'ready';
+  // A review being prepared again, or whose new try failed, still shows the previous one — dimmed, and nothing in
+  // it can be acted on until the new one is ready (its comments go out at the commit they were read at).
+  const ready = showsReview(r);
+  const stale = r.status !== 'ready';
   const modes = [
     ['overview', 'Overview', 'o'],
     ['story', `Stories (${pages.filter((p) => p.story).length})`, 's'],
@@ -441,6 +474,19 @@ function ReviewView({
             )}
           </p>
           <div className="wd-review-actions">
+            <Input
+              className="wd-session-review-also"
+              aria-label="For this review, also pay attention to"
+              placeholder="For this review, also pay attention to…"
+              title="Only this review is told it, beside the points set for every review (Settings → Reviews). Enter prepares."
+              value={also}
+              maxLength={2000}
+              disabled={preparing}
+              onChange={(e) => setAlso(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') prepare();
+              }}
+            />
             <button type="button" className="wd-btn-secondary" onClick={prepare} disabled={preparing}>
               {preparing ? 'Preparing…' : r.status === 'ready' ? 'Prepare again' : 'Prepare it now'}
             </button>
@@ -451,6 +497,7 @@ function ReviewView({
             )}
           </div>
         </div>
+        <ReviewFreshness status={r.status} at={r.at} {...(r.preparedAt ? { preparedAt: r.preparedAt } : {})} why={r.why} />
         {doubt && (
           <div className="wd-review-in-doubt" role="alert">
             <p className="wd-review-warn">
@@ -486,20 +533,14 @@ function ReviewView({
           </p>
         ))}
         {ready && (
-          <div className="wd-review-modes" role="tablist" aria-label="Read the review">
-            {modes.map(([m, label, key]) => (
-              <button
-                key={m}
-                type="button"
-                role="tab"
-                aria-selected={mode === m}
-                className={mode === m ? 'wd-seg wd-seg-on' : 'wd-seg'}
-                onClick={() => goMode(m, m === 'story' && route.mode === 'story' ? storyAt : 0)}
-                title={`${label} — key ${key}`}
-              >
-                {label}
-              </button>
-            ))}
+          <div className="wd-review-modes">
+            <Segmented
+              kind="tabs"
+              label="Read the review"
+              value={mode}
+              onChange={(m) => goMode(m, m === 'story' && route.mode === 'story' ? storyAt : 0)}
+              options={modes.map(([m, label, key]) => ({ value: m, label, title: `${label} — key ${key}` }))}
+            />
             <span className="wd-start-note wd-review-keys">[ ] previous / next</span>
           </div>
         )}
@@ -509,7 +550,7 @@ function ReviewView({
       {ready && (
         <ReviewProvider key={draftsKey} api={api}>
           <HostThreadsProvider value={hostThreads}>
-            <div className="wd-review-mode-body">
+            <div className={`wd-review-mode-body${stale ? ' wd-review-stale' : ''}`} inert={stale}>
               {mode === 'overview' && (
                 <ReviewOverview
                   review={r}
@@ -625,7 +666,7 @@ function SubmitBar({
       <span>
         {drafts.length} comment{drafts.length === 1 ? '' : 's'} on the diff
       </span>
-      <textarea
+      <TextArea
         value={body}
         onChange={(e) => setBody(e.target.value)}
         rows={1}
@@ -682,8 +723,8 @@ function ReviewSettings() {
   }, []);
   const set = (project: string, mode: ReviewMode) => saveReviewMode(project, mode).then(setS, (e: Error) => setError(e.message));
   return (
-    <section className="wd-review-section" aria-label="Which PRs are reviewed">
-      <h3>Which pull requests get a review prepared</h3>
+    <section className="wd-review-section wd-review-settings-panel" aria-label="Which PRs are reviewed">
+      <h2 className="wd-review-settings-title">Which pull requests get a review prepared</h2>
       <p className="wd-start-note">
         Every open PR of a project by default (never your own, never drafts); only those asking for your review; or none. A repo&apos;s own
         setting wins over its group&apos;s. Each review is an AI run on your plan
@@ -700,7 +741,7 @@ function ReviewSettings() {
                 {p.name} <span className="wd-start-note">{p.kind}</span>
               </td>
               <td>
-                <select
+                <Select
                   value={p.mode}
                   onChange={(e) => void set(p.name, e.target.value as ReviewMode)}
                   aria-label={`Reviews for ${p.name}`}
@@ -708,7 +749,7 @@ function ReviewSettings() {
                   <option value="all">every open PR</option>
                   <option value="asked">only those asking me</option>
                   <option value="off">none</option>
-                </select>
+                </Select>
                 {p.from === 'group' && <span className="wd-start-note"> (from the group {p.group})</span>}
                 {p.from === 'default' && <span className="wd-start-note"> (the default)</span>}
               </td>

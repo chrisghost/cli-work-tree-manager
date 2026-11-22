@@ -1,18 +1,19 @@
+import type { ReviewNotifyEvent } from '../../../core/api-types.js';
 import { setKeepAfterMerge } from '../api/client.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QuickSwitcher, useQuickSwitcher } from '../components/Dashboard/QuickSwitcher.js';
 import { ShortcutsHelp } from '../components/Dashboard/ShortcutsHelp.js';
 import { UpdateStrip } from '../components/Dashboard/UpdateStrip.js';
+import { StatusLineAsk } from '../components/Dashboard/StatusLineAsk.js';
 import { WhatsNew } from '../components/Dashboard/WhatsNew.js';
 import { useUpdates } from '../hooks/use-updates.js';
 import { useOutdatedAgents } from '../hooks/use-outdated-agents.js';
 import { useTaskbar } from '../hooks/use-taskbar.js';
 import { AgentsRestartCard } from '../components/Dashboard/AgentsRestartCard.js';
-import { outdatedNames } from '../state/agent-restart-view.js';
+import { outdatedNames, outdatedText } from '../state/agent-restart-view.js';
 import { desktopWire, useDesktop } from '../hooks/use-desktop.js';
 import { versionMismatch } from '../../../core/updates/updates.js';
 import { useMarkArchiving } from '../api/archive-pending.js';
-import { RowMenu, type MenuItem } from '../components/Dashboard/RowMenu.js';
 import { runSessionKey, SESSION_ACTION_EVENT, sessionActionFor, type SessionActionDetail } from '../state/shortcuts.js';
 import { Toast, useToast } from '../components/Dashboard/Toast.js';
 import { sessionMenuItems } from '../state/session-menu.js';
@@ -34,7 +35,7 @@ import {
   snoozeSession,
   unsnoozeSession,
 } from '../api/client.js';
-import { showNotify, usePresence } from '../hooks/use-presence.js';
+import { showNotify, showReviewNotify, usePresence } from '../hooks/use-presence.js';
 import { coalesce } from '../utils/coalesce.js';
 import { compareInbox, needsAttention, prWantsYou, waitsOnYou, wantsYou } from '../../../core/status/attention.js';
 import { InboxTab } from '../components/Dashboard/tabs/InboxTab.js';
@@ -47,7 +48,8 @@ import { ReviewsTab } from '../components/Dashboard/tabs/ReviewsTab.js';
 import { WelcomeTab } from '../components/Dashboard/tabs/WelcomeTab.js';
 import { fetchSetup } from '../api/panes.js';
 import { needsSetup } from '../state/setup.js';
-import { fetchProjects, fetchPrs, openInEditor, openInTerminal, type PrInfo } from '../api/panes.js';
+import { fetchProjects, fetchPrs, fetchReviews, openInEditor, openInTerminal, type PrInfo } from '../api/panes.js';
+import { reviewsWaiting } from '../state/review-view.js';
 import { isArchived, prsForSession, railGroups, type PrLookup } from '../state/session-display.js';
 import { useSse } from '../api/events.js';
 import { DashboardLayout } from '../components/Dashboard/DashboardLayout.js';
@@ -91,6 +93,7 @@ import {
 } from '../state/dashboard-route.js';
 import { readRailFolded, writeRailFolded } from '../state/review-prefs.js';
 import { dashboardDialogOpen, modalOpen as aModalIsOpen } from '../state/modal-open.js';
+import { Menu, type MenuItem } from '../ui/index.js';
 
 const TAB_LABEL: Record<DashboardTab, string> = {
   inbox: 'Inbox',
@@ -98,7 +101,7 @@ const TAB_LABEL: Record<DashboardTab, string> = {
   cleanup: 'Clean up',
   sessions: 'Sessions',
   start: 'Start',
-  jira: 'Jira',
+  issues: 'Issues',
   reviews: 'Reviews',
   time: 'Time',
   repos: 'Repos',
@@ -180,7 +183,7 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
     target?: string;
     branch?: string;
     base?: string;
-    jiraKey?: string;
+    issueKey?: string;
     prompt?: string;
   } | null>(null);
 
@@ -197,6 +200,9 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
   const [timeMonth, setTimeMonth] = useState<string | null>(null);
   // The Reviews tab's PR on screen: told to the Ctrl+K assistant with the view.
   const [reviewShown, setReviewShown] = useState<{ repo: string; number: number } | null>(null);
+  /** The review on screen, for a notification handler set up once (it reads the latest). */
+  const reviewShownRef = useRef(reviewShown);
+  reviewShownRef.current = reviewShown;
   // The session rail folded on the Reviews tab (per browser): a review wants the room.
   const [reviewsRailFolded, setReviewsRailFolded] = useState(readRailFolded);
   const toggleReviewsRail = useCallback(
@@ -391,18 +397,35 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
   // its `notify` events into click-to-jump browser notifications.
   usePresence(route.sessionId);
   const notifyTarget = useRef({ sessionId: route.sessionId, open: (_id: string, _sub: SessionSubTab) => {} });
+  // The Reviews tab's number: reviews ready that you haven't submitted. Read at load, on a reconnect and when one changes.
+  const [reviewsCount, setReviewsCount] = useState(0);
+  const loadReviewsCount = useCallback(() => {
+    void fetchReviews().then(
+      (w) => setReviewsCount(reviewsWaiting(w.reviews)),
+      () => {},
+    );
+  }, []);
+  useEffect(loadReviewsCount, [loadReviewsCount]);
   useSse('/events', {
     // (Re)connected: whatever changed while the stream was down (work web
     // restarting, the laptop asleep) was never sent — fetch it now.
     // Changes may have been missed while not connected — on a reconnect, and
     // between the first load and this first connect: fetch again (coalesced).
-    onOpen: () => setRefreshKey((n) => n + 1),
+    onOpen: () => {
+      setRefreshKey((n) => n + 1);
+      loadReviewsCount();
+    },
     events: {
+      'reviews-changed': loadReviewsCount,
       'session-order-changed': () => void fetchSessionOrder().then(setSessionOrder, () => {}),
       'rail-changed': () => void fetchRailLayout().then(setRailLayout, () => {}),
       'host-health': (data) => setHostHealth(data as HostHealth),
       'sessions-changed': () => setRefreshKey((n) => n + 1),
       'comments-changed': () => setRefreshKey((n) => n + 1),
+      'review-notify': (data) =>
+        showReviewNotify(data as ReviewNotifyEvent, reviewShownRef.current, (repo, number) =>
+          navigate({ tab: 'reviews', sessionId: null, sessionSubTab: 'term', review: { repo, number, mode: 'overview', at: 0 } }),
+        ),
       notify: (data) =>
         showNotify(data as NotifyEvent, notifyTarget.current.sessionId, (id, kind) =>
           // Its terminal, as every way into a session (a finished turn too: where you pick it up); its Review tab
@@ -646,7 +669,7 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
           a: 'accounts',
           ',': 'settings',
           c: 'cleanup',
-          j: 'jira',
+          j: 'issues',
           h: 'time',
           v: 'reviews',
           // The old chord for the PRs page: they're on Start.
@@ -895,7 +918,7 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
   } else {
     switch (route.tab) {
       case 'inbox':
-        body = <InboxTab sessions={sessions} onOpenSession={openSession} onReviewAll={startReview} />;
+        body = <InboxTab sessions={sessions} onOpenSession={openSession} onReviewAll={startReview} layout={railLayout} />;
         break;
       case 'today':
         body = <TodayTab onOpenSession={openSession} viewToggle={<NowTodayToggle value="today" onChange={sessionsView} />} />;
@@ -934,11 +957,19 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
           />
         );
         break;
-      case 'jira':
+      case 'issues':
         body = (
           <JiraTab
             sessions={sessions}
-            onPickIssue={(issue) => openNew({ branch: `feat/${issue.key}`, jiraKey: issue.key, prompt: jiraPrompt(issue) })}
+            onPickIssue={(issue) =>
+              openNew({
+                // Where your issue rules start it (Settings → Issues), when they say.
+                ...(issue.startsIn ? { target: issue.startsIn } : {}),
+                branch: `feat/${issue.key}`,
+                issueKey: issue.key,
+                prompt: jiraPrompt(issue),
+              })
+            }
             onOpenSession={(id) => openSession(id)}
           />
         );
@@ -1013,6 +1044,7 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
         onHome={goHome}
         onNewWorktree={() => openNew(null)}
         inboxCount={inboxCount}
+        reviewsCount={reviewsCount}
         prsFor={prsFor}
         onAssistant={toggleAssistant}
         usage={<UsageMeter onOpenSession={(id) => openSession(id)} onAccounts={() => goTab('accounts')} />}
@@ -1079,7 +1111,7 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
       )}
       <HostHealthBanner health={hostHealth} />
       <Toast toast={toast} onClose={hideToast} />
-      {switcherOpen && <QuickSwitcher sessions={sessions} onOpen={(id) => openSession(id)} onClose={closeSwitcher} />}
+      {switcherOpen && <QuickSwitcher sessions={sessions} onOpen={(id) => openSession(id)} onClose={closeSwitcher} layout={railLayout} />}
       {helpOpen && <ShortcutsHelp onClose={() => setHelpOpen(false)} />}
       <UpdateStrip
         updates={updates}
@@ -1098,8 +1130,10 @@ export function DashboardApp({ dev = false }: { dev?: boolean } = {}) {
           note={outdatedAgents.note}
         />
       )}
+      {/* Asked once, when that corner is free. */}
+      {!updates?.available && !outdatedText(outdatedAgents.agents) && !outdatedAgents.note && <StatusLineAsk />}
       {whatsNew && <WhatsNew focus={whatsNew.focus} onClose={closeWhatsNew} />}
-      {keyMenu && <RowMenu x={keyMenu.x} y={keyMenu.y} anchor="right" items={keyMenu.items} onClose={() => setKeyMenu(null)} />}
+      {keyMenu && <Menu x={keyMenu.x} y={keyMenu.y} anchor="right" items={keyMenu.items} onClose={() => setKeyMenu(null)} />}
       {blocking && (
         <BlockedByDialog
           session={blocking}

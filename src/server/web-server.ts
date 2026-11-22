@@ -1,3 +1,5 @@
+import { agentOf } from '../core/agents/index.js';
+import { createStartupQuestions } from '../core/status/startup-question.js';
 import type { SessionLocalReviewWire } from '../core/api-types.js';
 import fs from 'node:fs';
 import { mountSessionControlRoutes } from './routes/session-control-routes.js';
@@ -45,11 +47,12 @@ import { mountDiffPageRoutes } from './routes/diff-page-routes.js';
 import { mountSetupRoutes } from './routes/setup-routes.js';
 import { mountAppUpdateRoutes } from './routes/app-update-routes.js';
 import { wireUsage } from './routes/usage-routes.js';
-import { buildUsage, realUsageDeps } from '../core/usage/usage-source.js';
+import { anyOwnStatusLine, buildUsage, realUsageDeps, refreshUsage } from '../core/usage/usage-source.js';
 import { createUpdates, desktopUpdatePath, lookForUpdates } from '../core/updates/update-source.js';
 import { mountRepoRoutes } from './routes/repo-routes.js';
 import { mountSettingsRoutes } from './routes/settings-routes.js';
 import { configSettings } from '../core/settings/settings-admin.js';
+import { withOwnStatusLine } from '../core/settings/settings-source.js';
 import { mountTimelineRoutes } from './routes/timeline-routes.js';
 import { allBlocks, blockedPrState, blockerDone, blockKey, sweepBlocks, unblockedPrompt } from '../core/rail/session-blocks.js';
 import { mountBlockRoutes } from './routes/block-routes.js';
@@ -77,7 +80,7 @@ import { onArchived } from '../core/archive/session-archive.js';
 import { isRestoring, onArchivingChange } from '../core/archive/archiving.js';
 import { defaultArchiveDeps, archiveMergedSession } from '../core/archive/session-archive-deps.js';
 import { agentsBySession, summarizeAgents } from '../core/sessions/live-agents.js';
-import { liveAgents, activityRoots } from '../core/agents/index.js';
+import { liveAgents, activityRoots, knownAgents } from '../core/agents/index.js';
 import { branchCheckedOut, shadowedSessions } from '../core/worktree/shared-folders.js';
 import { sessionIdFor } from '../core/sessions/session-id.js';
 import { DiffStatCache, wantsDiffStat } from '../core/diff/diff-stat.js';
@@ -134,6 +137,8 @@ import {
   peekPty,
   ptyPids,
   ptyLastOutputMs,
+  ptyTerminals,
+  readPtyScreen,
   ptyPid,
   restartPty,
   terminalTicketUrl,
@@ -187,6 +192,14 @@ interface SessionDiffResult {
  * Per-repo `resolvedBase` is included on each entry so the UI can label
  * per-repo if it wants to (groups may have different parents per repo).
  */
+/** How often agents' screens are looked at for a question before their first turn (each only when it printed since). */
+const STARTUP_QUESTION_EVERY_MS = 5000;
+/** The questions agents are stopped at before their first turn (startup-question.ts). */
+const startupQuestions = createStartupQuestions({
+  screen: (id) => readPtyScreen(id),
+  question: (id, screen) => agentOf(findSession(id)).input.startupQuestion?.(screen) ?? null,
+});
+
 /** Where a session's own review stands, for its row: the review routes' (mounted after the sessions list is first built). */
 let localReviewRow: (sessionId: string) => SessionLocalReviewWire | null = () => null;
 
@@ -446,6 +459,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
                 },
                 hostedLive: (id) => peekPty(id),
                 outputStatusFor: (id) => outputStatus(id),
+                startupQuestionFor: (id) => startupQuestions.for(id),
                 shadowed: (id) => shadow.has(id),
                 reviewThreadsFor: (id) => reviewThreadsOf(prWatch.state(id)),
                 prStageFor: (id) => prStageWire(prWatch.state(id), (k) => stageSeen(id).has(k)),
@@ -709,6 +723,30 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
   };
   sleepSchedule?.next(Date.now() + SLEEP_EVERY_MS);
   const sleepTimer = !jobs ? null : setInterval(() => void sleepIdle(), SLEEP_EVERY_MS);
+  // Agents stopped at a question before their first turn ("do you trust this folder?"): read from their screens.
+  let lookingForQuestions = false;
+  const lookForStartupQuestions = async (): Promise<void> => {
+    // One look at a time: a slow host must not have them pile up.
+    if (lookingForQuestions) return;
+    lookingForQuestions = true;
+    const { changed, asked } = await startupQuestions
+      .check(ptyTerminals().map((t) => ({ ...t, turnAt: Date.parse(readStatus(t.id)?.updatedAt ?? '') || 0 })))
+      .finally(() => (lookingForQuestions = false));
+    if (changed) broadcast('sessions-changed', { ts: Date.now() });
+    for (const id of asked) {
+      const session = findSession(id);
+      const what = startupQuestions.for(id)?.what;
+      if (session && what)
+        broadcast('notify', {
+          sessionId: id,
+          kind: 'needs_input',
+          title: `${session.title || session.branch}: needs you`,
+          body: what,
+        } satisfies NotifyEvent);
+    }
+  };
+  const startupTimer = !jobs ? null : setInterval(() => void lookForStartupQuestions().catch(() => undefined), STARTUP_QUESTION_EVERY_MS);
+  startupTimer?.unref?.();
 
   // The Time tab's days (core/time/time-keeper.ts): today after each turn and
   // every half hour, and the workdays of the last two weeks not built yet.
@@ -738,7 +776,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
   });
   mountReviewRoutes(app, {
     ...reviewIo,
-    runNow: (repo, n) => reviewQueue.runNow(repo, n),
+    runNow: (repo, n, also) => reviewQueue.runNow(repo, n, also),
     refreshDiscussion: (repo, n) => reviewQueue.refreshDiscussion(repo, n),
     broadcast,
     // Fix it myself: a session on the PR's branch, made as New worktree makes one, or the live one told by a note.
@@ -1115,21 +1153,26 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
   // A session's own changes as a review (prepared on a click, kept in memory). Its AI step reads the diff alone,
   // in a lane of its own: its passes (one over everything, one per repo) run together, behind no PR's review.
   localReviewRow = mountSessionReviewRoutes(app, {
-    prepare: (session, repo) =>
-      prepareLocalReview(session, repo, {
-        diff: (s) => computeSessionDiff(s, 'branch'),
-        agent: (prompt) => runInternal(prompt, 240_000, { lane: 'localReviews' }),
-        // Read-only in the session's own folder when the agent can: it then answers what the diff leaves open.
-        inTree: (s, names) =>
-          localTreeRun(s.paths, names, {
-            readOnly: internalReadOnly,
-            run: (prompt, cwd, deny) => runInternalReadOnly(prompt, cwd, LOCAL_TREE_TIMEOUT_MS, { lane: 'localReviews', deny }),
-            exists: (dir) => fs.existsSync(dir),
-          }),
-        rules: () => rulesWith(loadConfig()?.reviews?.rules),
-        // Its project's and each of its repos' own points, with the ones for every review.
-        attention: (s) => reviewFocus(loadConfig(), [s.target, ...(s.repos ?? [])]),
-      }),
+    prepare: (session, repo, also) =>
+      prepareLocalReview(
+        session,
+        repo,
+        {
+          diff: (s) => computeSessionDiff(s, 'branch'),
+          agent: (prompt) => runInternal(prompt, 240_000, { lane: 'localReviews' }),
+          // Read-only in the session's own folder when the agent can: it then answers what the diff leaves open.
+          inTree: (s, names) =>
+            localTreeRun(s.paths, names, {
+              readOnly: internalReadOnly,
+              run: (prompt, cwd, deny) => runInternalReadOnly(prompt, cwd, LOCAL_TREE_TIMEOUT_MS, { lane: 'localReviews', deny }),
+              exists: (dir) => fs.existsSync(dir),
+            }),
+          rules: () => rulesWith(loadConfig()?.reviews?.rules),
+          // Its project's and each of its repos' own points, with the ones for every review.
+          attention: (s) => reviewFocus(loadConfig(), [s.target, ...(s.repos ?? [])]),
+        },
+        also,
+      ),
     signature: (s, repo) => localSignature(computeSessionDiff(s, 'branch'), repo ?? undefined),
     store: { read: readLocalReview, save: saveLocalReview, drop: dropLocalReview },
     tell: noteThroughComments(app),
@@ -1144,7 +1187,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
   // The Repos page: the repos in your folders, and the groups.
   mountRepoRoutes(app, { broadcast, activity, workBin: getWorkBin });
   // Work's settings and each repo's, over config.json.
-  mountSettingsRoutes(app, { broadcast, source: configSettings });
+  mountSettingsRoutes(app, { broadcast, source: withOwnStatusLine(configSettings, () => anyOwnStatusLine(knownAgents())) });
   mountSetupRoutes(app, { broadcast });
 
   // Updates and release notes (core/updates/): the release list a little
@@ -1169,7 +1212,11 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
   const onDesktopUpdate = () => broadcast('updates-changed', { ts: Date.now() });
   if (jobs) fs.watchFile(desktopFile, { interval: 3000 }, onDesktopUpdate); // the installed app's: not the dev server's business
   // Agent usage (core/usage/): plan limits the status-line hook recorded, and token counts. Reads only, so every mode serves it.
-  const usageWatcher = wireUsage(app, { broadcast, build: () => buildUsage(realUsageDeps()) });
+  const usageWatcher = wireUsage(app, {
+    broadcast,
+    build: () => buildUsage(realUsageDeps()),
+    refresh: () => refreshUsage(knownAgents()),
+  });
   // How the PTY host is doing (host-health.ts), and its Restart (the banner's button). Not the dev server's restart: it
   // never starts a host (the installed work owns it).
   mountPtyHostRoutes(app, {
@@ -1254,6 +1301,7 @@ export async function startWebServer(opts: WebServerOptions = {}): Promise<WebSe
       if (decayTick) clearInterval(decayTick);
       stopPrWatch?.();
       if (sleepTimer) clearInterval(sleepTimer);
+      if (startupTimer) clearInterval(startupTimer);
       if (conversationsTimer) clearInterval(conversationsTimer);
       if (conversationsFirst) clearTimeout(conversationsFirst);
       if (updatesFirst) clearTimeout(updatesFirst);

@@ -106,7 +106,7 @@ export interface SessionSummary {
   /** A session folder: a repo can be added to it (absent from a server before this: read `isGroup`). */
   folder?: boolean;
   baseBranch?: string;
-  jiraKey?: string;
+  issueKey?: string;
   createdAt: string;
   lastAccessedAt: string;
   /** Dashboard-only; absent when fetching from the wd -c review server. */
@@ -936,15 +936,22 @@ async function reviewCall<T>(sessionId: string, tail: string, body?: unknown): P
 }
 /** The review kept for a session's own changes (its Review tab), or that none is. */
 export const fetchSessionReview = (sessionId: string): Promise<SessionReview> => reviewCall(sessionId, '');
-/** Prepare it now (a repo of a session folder, else the first with changes): answers "running" at once. */
-export const prepareSessionReview = (sessionId: string, repo?: string): Promise<SessionReview> =>
-  reviewCall(sessionId, '', repo ? { repo } : {});
+/**
+ * Prepare it now (a repo of a session folder, else all with changes): answers "running" at once. `also`: what this
+ * one review should pay attention to, beside the points set for every review.
+ */
+export const prepareSessionReview = (sessionId: string, repo?: string, also?: string): Promise<SessionReview> =>
+  reviewCall(sessionId, '', { ...(repo ? { repo } : {}), ...(also?.trim() ? { also: also.trim() } : {}) });
 /** The diff the kept review was made of. */
 export const fetchSessionReviewDiff = (sessionId: string): Promise<{ files: import('../../../core/diff/diff-parse.js').ParsedFile[] }> =>
   reviewCall(sessionId, '/diff');
 /** Hand these notes of it to the session's agent; answers how many went. */
 export const sendSessionReviewNotes = (sessionId: string, ids: string[]): Promise<number> =>
   reviewCall<{ sent: number }>(sessionId, '/send', { ids }).then((r) => r.sent);
+
+/** Hand a session review's recommendation to its agent, with what you decided (empty: it is asked to lay the question out). */
+export const sendSessionReviewRecommendation = (sessionId: string, decision: string): Promise<{ decided: boolean }> =>
+  reviewCall<{ decided: boolean }>(sessionId, '/recommendation', decision.trim() ? { decision: decision.trim() } : {});
 
 /** What a session's agent and the things it started hold in memory now (a listing takes a second). */
 export async function fetchSessionProcesses(sessionId: string): Promise<import('../../../core/api-types.js').SessionProcessesWire> {

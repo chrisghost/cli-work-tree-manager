@@ -1,9 +1,13 @@
+import { sessionColor } from '../../../../core/rail/rail-layout.js';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { SessionSummary } from '../../api/client.js';
 import { displayStatus } from '../../state/session-display.js';
 import { switcherLabel, switcherResults } from '../../state/quick-switch.js';
 import { StatusIcon } from './StatusIcon.js';
+import { ColorMark } from './ColorMark.js';
 import { modalOpen } from '../../state/modal-open.js';
+import type { RailLayout } from '../../../../core/rail/rail-layout.js';
+import { Input } from '../../ui/index.js';
 
 /**
  * Ctrl+P: type a few letters of a session's name, branch or repo and press
@@ -14,10 +18,13 @@ export function QuickSwitcher({
   sessions,
   onOpen,
   onClose,
+  layout,
 }: {
   sessions: SessionSummary[];
   onOpen: (id: string) => void;
   onClose: (picked: boolean) => void;
+  /** The rail's places: each session's color, a square before its name. */
+  layout?: Pick<RailLayout, 'places'>;
 }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -34,10 +41,12 @@ export function QuickSwitcher({
   return (
     <div className="wd-switcher-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose(false)}>
       <div className="wd-switcher" role="dialog" aria-modal="true" aria-label="Go to a session">
-        <input
+        <Input
+          bare
+
           ref={inputRef}
           className="wd-switcher-input"
-          type="text"
+
           role="combobox"
           aria-expanded="true"
           aria-controls={listId}
@@ -80,6 +89,7 @@ export function QuickSwitcher({
               onMouseEnter={() => setActive(i)}
             >
               <StatusIcon kind={displayStatus(s)} />
+              <ColorMark color={sessionColor(layout, s)} />
               <span className="wd-switcher-name">{switcherLabel(s)}</span>
               <span className="wd-switcher-sub">
                 {s.target}

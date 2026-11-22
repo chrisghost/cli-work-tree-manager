@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PlacePatch, RailLayout, SectionOp } from '../../../../core/rail/rail-layout.js';
-import type { MenuItem } from './RowMenu.js';
 import { renameSession, type SessionSummary } from '../../api/client.js';
 import type { DashboardRoute } from '../../state/dashboard-route.js';
 import type { PrLookup } from '../../state/session-display.js';
 import { TopNav } from './TopNav.js';
 import { SessionRail } from './SessionRail.js';
 import { RAIL_SPEC, ResizeDivider, useResizableSize } from '../Layout/ResizeDivider.js';
+import type { MenuItem } from '../../ui/index.js';
 
 interface Props {
   /** Served by the dev server: a DEV badge on the top bar. */
@@ -21,6 +21,7 @@ interface Props {
   onNewWorktree: () => void;
   /** Badge on the Inbox tab. */
   inboxCount?: number;
+  reviewsCount?: number;
   /** Open PRs per session, for the rail badges. */
   prsFor?: PrLookup;
   /** Opens / closes the Ctrl+K assistant (the top-nav button). */
@@ -70,6 +71,7 @@ export function DashboardLayout({
   onHome,
   onNewWorktree,
   inboxCount,
+  reviewsCount,
   prsFor,
   onAssistant,
   assistantOpen,
@@ -113,6 +115,7 @@ export function DashboardLayout({
         onSelect={onSelectTab}
         onHome={onHome}
         inboxCount={inboxCount}
+        reviewsCount={reviewsCount}
         onToggleRail={() => setRailOpen((o) => !o)}
         railOpen={railOpen}
         onAssistant={onAssistant}

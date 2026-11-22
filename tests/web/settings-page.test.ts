@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { RepoSettingsWire, SettingsWire } from '../../src/core/api-types.js';
+import { allStylesheets } from './stylesheets.js';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -91,7 +92,7 @@ describe('the Settings page', () => {
       'Agents & terminals',
       'Pull requests',
       'Reviews',
-      'Jira',
+      'Issues',
       'Time',
       'Archive & usage',
     ]);
@@ -122,6 +123,19 @@ describe('the Settings page', () => {
     await act(async () => editor.dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
     expect(saveSetting).not.toHaveBeenCalled();
   });
+
+  it('a filter that matches nothing says so, inset like the rest of the page', async () => {
+    await act(async () =>
+      root.render(createElement(SettingsTab, { api: { fetchSettings: async () => wire({}), saveSetting: async () => wire({}) } })),
+    );
+    await flush();
+    await act(async () => typeInto(host.querySelector<HTMLInputElement>('.wd-settings-filter')!, 'zzz-no-such-setting'));
+    const empty = host.querySelector('.wd-settings-empty')!;
+    expect(empty.textContent).toContain('No setting matches');
+    expect(host.querySelectorAll('.wd-settings-section')).toHaveLength(0);
+    // It shares the intro's inset, so it doesn't sit against the rail.
+    expect(allStylesheets()).toMatch(/\.wd-settings-intro,\s*\.wd-settings-empty,[^{]*\{\s*padding-left: 32px;/);
+  });
 });
 
 describe("a repo's settings", () => {
@@ -134,6 +148,7 @@ describe("a repo's settings", () => {
     devCommand: null,
     reviews: null,
     reviewFocus: null,
+    color: null,
     ...over,
   });
 
@@ -152,5 +167,29 @@ describe("a repo's settings", () => {
     await flush();
     expect(saveRepoSetting).toHaveBeenCalledWith('straumur-backend', 'requiredChecks', ['Test', 'Warning Check']);
     expect(host.textContent).toContain('Now: Test, Warning Check.');
+  });
+
+  it('a colour for its sessions: the six to pick from, saved as picked, and back to none', async () => {
+    let now = repo();
+    const saveRepoSetting = vi.fn(async (_alias: string, key: string, value: unknown) => (now = repo({ [key]: value })));
+    await act(async () =>
+      root.render(createElement(RepoSettings, { alias: 'straumur-backend', api: { fetchRepoSettings: async () => now, saveRepoSetting } })),
+    );
+    await flush();
+    const select = host.querySelector<HTMLSelectElement>('#repo-straumur-backend-color')!;
+    expect([...select.options].map((o) => o.textContent)).toEqual(['—', 'Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple']);
+    expect(select.value).toBe('');
+    await act(async () => {
+      select.value = 'blue';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(saveRepoSetting).toHaveBeenCalledWith('straumur-backend', 'color', 'blue');
+    await act(async () => {
+      select.value = '';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await flush();
+    expect(saveRepoSetting).toHaveBeenLastCalledWith('straumur-backend', 'color', null);
   });
 });

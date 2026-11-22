@@ -24,7 +24,8 @@ import {
   pointsLabel,
 } from '../../../../state/review-view.js';
 import { DroppedDrafts } from './DroppedDrafts.js';
-import { FileRow, FileWhere, Prose } from './ReviewText.js';
+import { FileRow, FileWhere, FLOW_TONE, Prose, STORY_VERDICT_TONE } from './ReviewText.js';
+import { Badge, Button, TextArea } from '../../../../ui/index.js';
 
 /**
  * A review's overview — where it opens: what the PR does in short, the draft
@@ -44,6 +45,7 @@ export function ReviewOverview({
   aside = [],
   onFiles = () => undefined,
   noteActions,
+  onDecide,
 }: {
   review: PrReviewWire;
   pages: ReviewPage[];
@@ -59,7 +61,27 @@ export function ReviewOverview({
   onFiles?: () => void;
   /** What can be done with one note, beside it (a session's review: send it to Claude, or dismiss it). */
   noteActions?: (d: ReviewDraftWire) => ReactNode;
+  /** A session's review: hand the recommendation to its agent with what you decided (empty: ask it to lay the question out). */
+  onDecide?: (decision: string) => Promise<void>;
 }) {
+  const [decision, setDecision] = useState('');
+  const [deciding, setDeciding] = useState<'idle' | 'sending' | 'sent'>('idle');
+  const [decideError, setDecideError] = useState<string | null>(null);
+  const decide = () => {
+    if (!onDecide) return;
+    setDeciding('sending');
+    setDecideError(null);
+    onDecide(decision).then(
+      () => {
+        setDeciding('sent');
+        setDecision('');
+      },
+      (e: Error) => {
+        setDeciding('idle');
+        setDecideError(e.message);
+      },
+    );
+  };
   const [testsOpen, setTestsOpen] = useState(false);
   const [noiseOpen, setNoiseOpen] = useState(false);
   const short = inShort(r);
@@ -129,6 +151,40 @@ export function ReviewOverview({
               </>
             )}
           </p>
+          {onDecide && (
+            <div className="wd-review-decide">
+              <label className="wd-start-note" htmlFor="wd-review-decision">
+                Your decision on it, for this session’s Claude (empty: it is asked to lay the question out and change nothing)
+              </label>
+              <TextArea
+                id="wd-review-decision"
+                rows={3}
+                value={decision}
+                maxLength={4000}
+                disabled={deciding === 'sending'}
+                placeholder="e.g. Pay out what is due and leave the held settlement attached. Check the race and add a test."
+                onChange={(e) => {
+                  setDecision(e.target.value);
+                  if (deciding === 'sent') setDeciding('idle');
+                }}
+              />
+              <span className="wd-review-decide-actions">
+                <Button
+                  onClick={decide}
+                  disabled={deciding === 'sending'}
+                  title="Hands the recommendation to this session's Claude: with your decision to follow, or, left empty, a request to lay the open questions out first"
+                >
+                  {deciding === 'sending' ? 'Sending…' : decision.trim() ? 'Send my decision to its Claude' : 'Ask its Claude about it'}
+                </Button>
+                {deciding === 'sent' && (
+                  <span className="wd-start-note" role="status">
+                    Handed to its Claude.
+                  </span>
+                )}
+                {decideError && <span className="wd-tab-error">{decideError}</span>}
+              </span>
+            </div>
+          )}
         </section>
       )}
       {r.flows && r.flows.length > 0 && (
@@ -139,7 +195,9 @@ export function ReviewOverview({
           {r.flows.map((f, i) => (
             <details key={i} className="wd-review-flow" open={r.flows!.length <= 2}>
               <summary>
-                <span className={`wd-review-flow-change wd-review-flow-${f.change}`}>{FLOW_CHANGE_LABEL[f.change]}</span>{' '}
+                <Badge kind="status" tone={FLOW_TONE[f.change]} className={`wd-review-flow-change wd-review-flow-${f.change}`}>
+                  {FLOW_CHANGE_LABEL[f.change]}
+                </Badge>{' '}
                 <Prose text={f.title} />
               </summary>
               <ol>
@@ -213,14 +271,19 @@ export function ReviewOverview({
                     <span className="wd-review-card-meta">
                       <span className={`wd-review-risk wd-review-risk-${c.riskLevel}`}>risk {c.riskLevel}/5</span>
                       {c.verdict && (
-                        <span className={`wd-review-story-verdict wd-review-story-verdict-${c.verdict}`} title={c.verdictWhy}>
+                        <Badge
+                          kind="status"
+                          tone={STORY_VERDICT_TONE[c.verdict]}
+                          className={`wd-review-story-verdict wd-review-story-verdict-${c.verdict}`}
+                          title={c.verdictWhy}
+                        >
                           {STORY_VERDICT_LABEL[c.verdict]}
-                        </span>
+                        </Badge>
                       )}
                       {c.flags.map((f) => (
-                        <span key={f} className="wd-review-flag">
+                        <Badge key={f} kind="status" tone="warn" className="wd-review-flag">
                           {FLAG_LABEL[f]}
-                        </span>
+                        </Badge>
                       ))}
                     </span>
                     <span className="wd-review-card-facts">
